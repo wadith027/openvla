@@ -25,6 +25,14 @@ SEVERITY_TO_GAMMA_OFFSET = [0.05, 0.10, 0.15, 0.20, 0.25]
 SEVERITY_TO_NOISE_STD = [3.0, 6.0, 9.0, 12.0, 15.0]
 SEVERITY_TO_BLUR_SIGMA = [0.4, 0.8, 1.2, 1.6, 2.0]
 MAX_BLUR_KERNEL_SIZE = 13
+WALL_GEOM_NAMES = {
+    "wall_leftcorner_visual",
+    "wall_rightcorner_visual",
+    "wall_left_visual",
+    "wall_right_visual",
+    "wall_rear_visual",
+    "wall_front_visual",
+}
 
 
 
@@ -217,6 +225,24 @@ def get_xml(env):
     return xml
 
 
+def get_texture_groups_from_asset(textures):
+    wall_names = {"wall", "plaster", "sky", "background"}
+    table_names = {"floor", "ceramic", "table"}
+
+    wall_textures = []
+    floor_textures = []
+    for texture_name, texture_elem in textures.items():
+        texture_file = (texture_elem.get("file") or "").lower()
+        searchable_name = f"{texture_name.lower()} {texture_file}"
+
+        if any(k in searchable_name for k in wall_names):
+            wall_textures.append(texture_name)
+        elif any(k in searchable_name for k in table_names):
+            floor_textures.append(texture_name)
+
+    return wall_textures, floor_textures
+
+
 def replace_target_textures(env, severity, seed):
 
     if not isinstance(severity, int) or not (1 <= severity <= 4):
@@ -269,11 +295,32 @@ def replace_target_textures(env, severity, seed):
         if material_name not in materials:
             continue
 
+        # Allow explicit wall/table geom names to be targeted even if the current material has no texture yet.
+        if name.lower() in WALL_GEOM_NAMES:
+            group = "wall"
+            target_materials[group].add(material_name)
+            continue
+
         texture_name = materials[material_name].get("texture")
         if texture_name not in textures:
             continue
 
         if textures[texture_name].get("file") is None:
+            continue
+
+        searchable_name = " ".join(
+            [
+                name.lower(),
+                material_name.lower(),
+                texture_name.lower(),
+                textures[texture_name].get("file", "").lower(),
+            ]
+        )
+        if any(k in searchable_name for k in {"wall", "plaster", "sky", "background"}):
+            group = "wall"
+        elif any(k in searchable_name for k in {"floor", "ceramic", "table"}):
+            group = "table"
+        else:
             continue
 
         target_materials[group].add(material_name)

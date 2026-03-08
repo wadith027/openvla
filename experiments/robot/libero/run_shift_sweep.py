@@ -23,6 +23,7 @@ from typing import List, Optional, Tuple
 
 import draccus
 
+from experiments.robot.libero.libero_utils import SUPPORTED_SHIFT_MODES
 from experiments.robot.robot_utils import DATE_TIME
 
 RECOMMENDED_VERSIONS = {
@@ -51,13 +52,14 @@ class SweepConfig:
     # Sweep axes
     #################################################################################################################
     shift_names: List[str] = field(default_factory=lambda: ["appearance"])
-    sweep_severities: List[int] = field(default_factory=lambda: [0, 1, 2, 3, 4])
+    sweep_severities: List[int] = field(default_factory=lambda: [ 1, 2, 3, 4])
     seeds: List[int] = field(default_factory=lambda: [0, 1, 2])
+    shift_mode: str = "gamma"
 
     #################################################################################################################
     # Logging
     #################################################################################################################
-    local_log_dir: str = "./experiments/logs"
+    local_log_dir: str = f"./experiments/logs/{shift_mode}"
     sweep_name: str = "shift_sweep"
     manifest_path: Optional[str] = None
 
@@ -117,22 +119,26 @@ def _validate_sweep_cfg(cfg: SweepConfig) -> None:
         raise ValueError("Expected at least one sweep severity.")
     if len(cfg.seeds) == 0:
         raise ValueError("Expected at least one seed.")
+    if cfg.shift_mode not in SUPPORTED_SHIFT_MODES:
+        raise ValueError(
+            f"Unexpected shift_mode '{cfg.shift_mode}'. Supported values: {sorted(SUPPORTED_SHIFT_MODES)}"
+        )
     for severity in cfg.sweep_severities:
         if severity < 0 or severity > 4:
             raise ValueError(f"Expected sweep severity in [0, 4], got {severity}.")
 
 
-def _map_eval_shift(shift_name: str, sweep_severity: int) -> Tuple[str, str, int]:
+def _map_eval_shift(shift_name: str, sweep_severity: int) -> Tuple[str, int]:
     """
     Maps external sweep severity (0..4) to eval config:
       - 0 -> baseline (shift_name=none, severity=1 unused)
       - 1..4 -> perturbed run
     """
     if sweep_severity == 0:
-        return "none", "noise_blur_gamma", 1
+        return "none",  1
 
     if shift_name == "appearance":
-        return "appearance", "noise_blur_gamma", sweep_severity
+        return "appearance",  sweep_severity
 
     raise NotImplementedError(
         f"Shift '{shift_name}' is not implemented yet in run_libero_eval.py. "
@@ -173,7 +179,7 @@ def run_shift_sweep(cfg: SweepConfig) -> None:
         for sweep_severity in cfg.sweep_severities:
             for seed in cfg.seeds:
                 run_idx += 1
-                effective_shift_name, shift_mode, severity = _map_eval_shift(shift_name, sweep_severity)
+                effective_shift_name, severity = _map_eval_shift(shift_name, sweep_severity)
                 run_id_note = f"{cfg.sweep_name}__{shift_name}_s{sweep_severity}_seed{seed}"
 
                 command = [
@@ -194,7 +200,7 @@ def run_shift_sweep(cfg: SweepConfig) -> None:
                     "--shift_name",
                     effective_shift_name,
                     "--shift_mode",
-                    shift_mode,
+                    cfg.shift_mode,
                     "--severity",
                     str(severity),
                     "--sweep_severity",
@@ -226,7 +232,7 @@ def run_shift_sweep(cfg: SweepConfig) -> None:
                     "run_id_note": run_id_note,
                     "shift_name": shift_name,
                     "effective_shift_name": effective_shift_name,
-                    "shift_mode": shift_mode,
+                    "shift_mode": cfg.shift_mode,
                     "severity": severity,
                     "sweep_severity": sweep_severity,
                     "seed": seed,

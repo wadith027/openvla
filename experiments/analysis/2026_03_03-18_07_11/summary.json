@@ -1,0 +1,19 @@
+{
+  "artifacts": {
+    "appearance": {
+      "csv_path": "experiments/analysis/2026_03_03-18_07_11/appearance_summary.csv",
+      "plot_path": "experiments/analysis/2026_03_03-18_07_11/appearance_severity_curve.png"
+    }
+  },
+  "metrics_glob": "./experiments/logs/*.metrics.json",
+  "num_runs_filtered": 15,
+  "task_suite_name": "libero_spatial",
+  "threshold_summary": {
+    "appearance": {
+      "failure_cutoff": 0.3,
+      "first_crossing_threshold": 4,
+      "worst_case_severity": 4,
+      "worst_case_success_rate": 0.2833333333333334
+    }
+  }
+}

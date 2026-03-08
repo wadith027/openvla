@@ -585,7 +585,7 @@ python experiments/robot/libero/run_libero_eval.py \
 `run_libero_eval.py` now supports deterministic appearance shifts at evaluation time:
 
 * `--shift_name`: shift family (`none` by default, or `appearance`)
-* `--shift_mode`: mode for the shift (`noise_blur_gamma` by default)
+* `--shift_mode`: mode for the shift (`gamma` by default; options: `noise`, `blur`, `gamma`)
 * `--severity`: integer severity in `[1, 5]` (used when `--shift_name appearance`)
 * `--sweep_severity`: optional sweep label in `[0, 4]` used for aggregation/plotting
 * `--metrics_output_path`: optional explicit path for structured metrics JSON output
@@ -600,7 +600,7 @@ python experiments/robot/libero/run_libero_eval.py \
   --task_suite_name libero_spatial \
   --center_crop True \
   --shift_name appearance \
-  --shift_mode noise_blur_gamma \
+  --shift_mode gamma \
   --severity 3 \
   --seed 7
 ```
@@ -618,7 +618,8 @@ python experiments/robot/libero/run_shift_sweep.py \
   --pretrained_checkpoint openvla/openvla-7b-finetuned-libero-spatial \
   --task_suite_name libero_spatial \
   --center_crop True \
-  --num_trials_per_task 5
+  --num_trials_per_task 5 \
+  --shift_mode gamma
 
 # Aggregate metrics and generate curves/tables
 python experiments/robot/libero/analyze_shift_sweeps.py \

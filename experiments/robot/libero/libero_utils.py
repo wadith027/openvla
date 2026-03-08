@@ -7,15 +7,16 @@ import imageio
 import numpy as np
 import tensorflow as tf
 from libero.libero import get_libero_path
-from libero.libero.envs import OffScreenRenderEnv
-
+from libero.libero.envs import OffScreenRenderEnv, postprocess_model_xml
 from experiments.robot.robot_utils import (
     DATE,
     DATE_TIME,
 )
+import xml.etree.ElementTree as ET
+import copy
 
 SUPPORTED_SHIFT_NAMES = {"none", "appearance"}
-SUPPORTED_SHIFT_MODES = {"noise_blur_gamma"}
+SUPPORTED_SHIFT_MODES = {"noise", "blur", "gamma", "texture"}
 SEVERITY_TO_GAMMA_OFFSET = [0.05, 0.10, 0.15, 0.20, 0.25]
 SEVERITY_TO_NOISE_STD = [3.0, 6.0, 9.0, 12.0, 15.0]
 SEVERITY_TO_BLUR_SIGMA = [0.4, 0.8, 1.2, 1.6, 2.0]
@@ -93,7 +94,7 @@ def build_episode_shift_state(cfg, resize_size, task_id, episode_idx):
 
     if cfg.shift_name != "appearance":
         raise ValueError(f"Unsupported shift_name: {cfg.shift_name}")
-    if cfg.shift_mode != "noise_blur_gamma":
+    if cfg.shift_mode not in SUPPORTED_SHIFT_MODES:
         raise ValueError(f"Unsupported shift_mode: {cfg.shift_mode}")
     if not isinstance(cfg.severity, int) or not (1 <= cfg.severity <= 5):
         raise ValueError(f"Expected severity to be an integer in [1, 5], got: {cfg.severity}")
@@ -115,10 +116,11 @@ def build_episode_shift_state(cfg, resize_size, task_id, episode_idx):
         "task_id": task_id,
         "episode_idx": episode_idx,
         "seed": seed,
+        # Always keep scalar params populated so logging stays robust across single-mode runs.
         "gamma": gamma,
         "noise_std": noise_std,
         "blur_sigma": blur_sigma,
-        "noise_map": noise_map,
+        "noise_map": noise_map if cfg.shift_mode == "noise" else None,
     }
 
 
@@ -128,19 +130,22 @@ def apply_shift(img, cfg, shift_state):
         return img
     if cfg.shift_name != "appearance":
         raise ValueError(f"Unsupported shift_name: {cfg.shift_name}")
-    if cfg.shift_mode != "noise_blur_gamma":
+    if cfg.shift_mode not in SUPPORTED_SHIFT_MODES:
         raise ValueError(f"Unsupported shift_mode: {cfg.shift_mode}")
 
     shifted_img = img.astype(np.float32)
 
-    # Gamma correction (lighting proxy)
-    shifted_img = 255.0 * np.power(np.clip(shifted_img / 255.0, 0.0, 1.0), shift_state["gamma"])
+    if cfg.shift_mode == "gamma":
+        # Gamma correction (lighting proxy)
+        shifted_img = 255.0 * np.power(np.clip(shifted_img / 255.0, 0.0, 1.0), shift_state["gamma"])
 
-    # Additive Gaussian sensor noise
-    shifted_img = shifted_img + shift_state["noise_map"]
+    elif cfg.shift_mode == "noise":
+        # Additive Gaussian sensor noise
+        shifted_img = shifted_img + shift_state["noise_map"]
 
-    # Defocus/motion blur proxy
-    shifted_img = _apply_gaussian_blur(shifted_img, shift_state["blur_sigma"])
+    elif cfg.shift_mode == "blur":
+        # Defocus/motion blur proxy
+        shifted_img = _apply_gaussian_blur(shifted_img, shift_state["blur_sigma"])
 
     shifted_img = np.clip(shifted_img, 0.0, 255.0).astype(np.uint8)
     return shifted_img
@@ -155,7 +160,54 @@ def get_libero_env(task, model_family, resolution=256):
     env.seed(0)  # IMPORTANT: seed seems to affect object positions even when using fixed initial state
     return env, task_description
 
+def get_target_objects(env):
+    xml = env.sim.model.get_xml()
+    xml = postprocess_model_xml(xml, {})
 
+    targets = list(env.obj_of_interest)
+
+    root_body_to_obj = {}
+    for obj in targets:
+        if hasattr(env, "env") and hasattr(env.env, "objects_dict") and obj in env.env.objects_dict:
+            root_body = env.env.objects_dict[obj].root_body
+        else:
+            root_body = obj  # fallback
+        root_body_to_obj[root_body] = obj
+
+    return xml, root_body_to_obj
+
+
+def replace_target_textures(env):
+    xml, target_to_root_body = get_target_objects(env)
+    # get xml repr
+    root = ET.fromstring(xml)
+    
+    asset = root.find("asset")
+    worldbody = root.find("worldbody")
+
+    # get textures and materials
+    textures = {t.get("name") : t for t in asset.findall("texture") if t.get("name")}
+    materials = {m.get("name") : m for m in asset.findall("material") if m.get("name")}
+
+    target_root_bodies = set(target_to_root_body.keys())
+
+    target_geoms: dict[str, list[ET.Element]] = {}  # obj -> geom elems
+    for root_body_name, obj_name in target_to_root_body.items():
+        body_elem = None
+        for body in worldbody.iter("body"):
+            if body.get("name") == root_body_name:
+                body_elem = body
+                break
+        if body_elem is None:
+            continue
+        geoms = [geom for geom in root_body_elem.iter("geom")]  
+        
+        geoms = [g for g in geoms if g.get("material")]
+
+        target_geoms[obj_name] = geoms
+    
+                
+    
 def get_libero_dummy_action(model_family: str):
     """Get dummy/no-op action, used to roll out the simulation while the robot does nothing."""
     return [0, 0, 0, 0, 0, 0, -1]
@@ -189,9 +241,11 @@ def get_libero_image(obs, resize_size):
     return img
 
 
-def save_rollout_video(rollout_images, idx, success, task_description, log_file=None):
+def save_rollout_video(rollout_images, idx, success, task_description,shift=None, log_file=None):
     """Saves an MP4 replay of an episode."""
     rollout_dir = f"./rollouts/{DATE}"
+    if shift is not None:
+        rollout_dir = f"./rollouts/{DATE}/{shift}"
     os.makedirs(rollout_dir, exist_ok=True)
     processed_task_description = task_description.lower().replace(" ", "_").replace("\n", "_").replace(".", "_")[:50]
     mp4_path = f"{rollout_dir}/{DATE_TIME}--episode={idx}--success={success}--task={processed_task_description}.mp4"

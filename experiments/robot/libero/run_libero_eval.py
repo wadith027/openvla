@@ -78,7 +78,7 @@ class GenerateConfig:
     num_trials_per_task: int = 50                    # Number of rollouts per task
 
     shift_name: str = "none"                         # Shift family. Options: none, appearance
-    shift_mode: str = "noise_blur_gamma"             # Shift mode. Options (appearance): noise_blur_gamma
+    shift_mode: str = "gamma"                        # Shift mode. Options (appearance): noise, blur, gamma
     severity: int = 1                                # Shift severity (used when shift_name != none). Range: [1, 5]
     sweep_severity: Optional[int] = None             # Sweep severity label for plotting/aggregation. Range: [0, 4]
 
@@ -86,7 +86,7 @@ class GenerateConfig:
     # Utils
     #################################################################################################################
     run_id_note: Optional[str] = None                # Extra note to add in run ID for logging
-    local_log_dir: str = "./experiments/logs"        # Local directory for eval logs
+    local_log_dir: str = f"./experiments/logs"        # Local directory for eval logs
     metrics_output_path: Optional[Union[str, Path]] = None  # Optional path for structured metrics JSON output
 
     use_wandb: bool = False                          # Whether to also log results in Weights & Biases
@@ -111,8 +111,6 @@ def validate_shift_config(cfg: GenerateConfig) -> None:
         return
     if not isinstance(cfg.severity, int) or not (1 <= cfg.severity <= 5):
         raise ValueError(f"Expected severity to be an integer in [1, 5], got: {cfg.severity}")
-    if cfg.shift_name == "appearance" and cfg.shift_mode != "noise_blur_gamma":
-        raise ValueError("Appearance shift currently only supports shift_mode='noise_blur_gamma'.")
 
 
 @draccus.wrap()
@@ -156,7 +154,8 @@ def eval_libero(cfg: GenerateConfig) -> None:
     if cfg.run_id_note is not None:
         run_id += f"--{cfg.run_id_note}"
     os.makedirs(cfg.local_log_dir, exist_ok=True)
-    local_log_filepath = os.path.join(cfg.local_log_dir, run_id + ".txt")
+    os.makedirs(os.path.join(cfg.local_log_dir, cfg.shift_mode), exist_ok=True)
+    local_log_filepath = os.path.join(cfg.local_log_dir, cfg.shift_mode, run_id + ".txt")
     log_file = open(local_log_filepath, "w")
     print(f"Logging to local log file: {local_log_filepath}")
 
@@ -295,7 +294,7 @@ def eval_libero(cfg: GenerateConfig) -> None:
 
             # Save a replay video of the episode
             save_rollout_video(
-                replay_images, total_episodes, success=done, task_description=task_description, log_file=log_file
+                replay_images, total_episodes, success=done, task_description=task_description, shift=cfg.shift_mode, log_file=log_file
             )
 
             # Log current results

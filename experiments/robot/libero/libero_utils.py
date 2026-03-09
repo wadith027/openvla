@@ -1,9 +1,5 @@
 """Utils for evaluating policies in LIBERO simulation environments."""
 
-from pathlib import Path
-import ast
-import inspect
-import libero.libero.envs.textures as textures
 import math
 import os
 
@@ -16,6 +12,7 @@ from experiments.robot.robot_utils import (
 )
 from libero.libero import get_libero_path
 from libero.libero.envs import OffScreenRenderEnv
+from libero.libero.envs.textures import get_texture_file_list
 from libero.libero.envs.utils import postprocess_model_xml
 import xml.etree.ElementTree as ET
 
@@ -180,41 +177,6 @@ def get_libero_env(task, model_family, resolution=256):
 
 
 
-def get_texture_groups():
-
-    background_names = {"wall", "plaster", "sky"}
-    table_names = {"floor", "ceramic", "table"}
-
-    path = Path(inspect.getsourcefile(textures))
-
-    module = ast.parse(path.read_text())
-
-    TEXTURE_MAPPING = None
-
-    for node in module.body:
-        if isinstance(node, ast.Assign):
-            for target in node.targets:
-                if isinstance(target, ast.Name) and target.id == "TEXTURE_MAPPING":
-                    TEXTURE_MAPPING = ast.literal_eval(node.value)
-
-    if TEXTURE_MAPPING is None:
-        raise ValueError("TEXTURE_MAPPING not found in textures.py")
-
-    walls = []
-    tables = []
-
-    for tex_id, tex_name in TEXTURE_MAPPING.items():
-        name = tex_name.lower()
-
-        if any(k in name for k in table_names):
-            tables.append(tex_id)
-
-        elif any(k in name for k in background_names):
-            walls.append(tex_id)
-
-    return walls, tables
-
-
 def get_xml(env):
     if not hasattr(env, "_texture_shift_base_xml"):
         xml = env.sim.model.get_xml()
@@ -223,24 +185,6 @@ def get_xml(env):
     xml = env._texture_shift_base_xml
 
     return xml
-
-
-def get_texture_groups_from_asset(textures):
-    wall_names = {"wall", "plaster", "sky", "background"}
-    table_names = {"floor", "ceramic", "table"}
-
-    wall_textures = []
-    floor_textures = []
-    for texture_name, texture_elem in textures.items():
-        texture_file = (texture_elem.get("file") or "").lower()
-        searchable_name = f"{texture_name.lower()} {texture_file}"
-
-        if any(k in searchable_name for k in wall_names):
-            wall_textures.append(texture_name)
-        elif any(k in searchable_name for k in table_names):
-            floor_textures.append(texture_name)
-
-    return wall_textures, floor_textures
 
 
 def replace_target_textures(env, severity, seed):
@@ -261,17 +205,32 @@ def replace_target_textures(env, severity, seed):
 
     textures = {t.get("name"): t for t in asset.findall("texture") if t.get("name")}
     materials = {m.get("name"): m for m in asset.findall("material") if m.get("name")}
+    assets_path = get_libero_path("assets")
+    wall_texture_files = [
+        texture_file
+        for _, texture_file in get_texture_file_list(type="wall", texture_path=assets_path)
+        if os.path.exists(texture_file)
+    ]
+    floor_texture_files = [
+        texture_file
+        for _, texture_file in get_texture_file_list(type="floor", texture_path=assets_path)
+        if os.path.exists(texture_file)
+    ]
+    table_texture_files = [
+        texture_file
+        for _, texture_file in get_texture_file_list(type="table", texture_path=assets_path)
+        if os.path.exists(texture_file)
+    ]
+    table_pool = list(dict.fromkeys(floor_texture_files + table_texture_files))
 
-    wall_textures, floor_textures = get_texture_groups_from_asset(textures)
+    wall_texture_file = None
+    table_texture_file = None
 
-    wall_texture = None
-    floor_texture = None
+    if severity in (2, 4) and wall_texture_files:
+        wall_texture_file = str(rng.choice(wall_texture_files))
 
-    if severity in (2, 4) and wall_textures:
-        wall_texture = str(rng.choice(wall_textures))
-
-    if severity in (3, 4) and floor_textures:
-        floor_texture = str(rng.choice(floor_textures))
+    if severity in (3, 4) and table_pool:
+        table_texture_file = str(rng.choice(table_pool))
 
     target_materials = {
         "wall": set(),
@@ -331,18 +290,28 @@ def replace_target_textures(env, severity, seed):
     # Swap wall textures
     # --------------------------------------------------
 
-    if wall_texture is not None:
+    if wall_texture_file is not None:
         for m in target_materials["wall"]:
-            materials[m].set("texture", wall_texture)
+            texture_name = materials[m].get("texture")
+            if texture_name not in textures:
+                continue
+            if textures[texture_name].get("file") is None:
+                continue
+            textures[texture_name].set("file", wall_texture_file)
             swapped.append(m)
 
     # --------------------------------------------------
     # Swap table textures
     # --------------------------------------------------
 
-    if floor_texture is not None:
+    if table_texture_file is not None:
         for m in target_materials["table"]:
-            materials[m].set("texture", floor_texture)
+            texture_name = materials[m].get("texture")
+            if texture_name not in textures:
+                continue
+            if textures[texture_name].get("file") is None:
+                continue
+            textures[texture_name].set("file", table_texture_file)
             swapped.append(m)
 
     if not swapped:

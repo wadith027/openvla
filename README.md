@@ -619,7 +619,7 @@ python experiments/robot/libero/run_shift_sweep.py \
   --task_suite_name libero_spatial \
   --center_crop True \
   --num_trials_per_task 5 \
-  --shift_mode gamma
+  --shift_mode texture
 
 # Aggregate metrics and generate curves/tables
 python experiments/robot/libero/analyze_shift_sweeps.py \

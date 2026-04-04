@@ -23,7 +23,12 @@ from typing import List, Optional, Tuple
 
 import draccus
 
-from experiments.robot.libero.libero_utils import SUPPORTED_SHIFT_MODES
+from experiments.robot.libero.libero_utils import (
+    PHYSICS_MAX_SEVERITY,
+    SUPPORTED_APPEARANCE_MODES,
+    SUPPORTED_PHYSICS_MODES,
+    SUPPORTED_SHIFT_MODES,
+)
 from experiments.robot.robot_utils import DATE_TIME
 
 RECOMMENDED_VERSIONS = {
@@ -123,9 +128,22 @@ def _validate_sweep_cfg(cfg: SweepConfig) -> None:
         raise ValueError(
             f"Unexpected shift_mode '{cfg.shift_mode}'. Supported values: {sorted(SUPPORTED_SHIFT_MODES)}"
         )
+    # Validate that shift_mode is compatible with the requested shift_names
+    for shift_name in cfg.shift_names:
+        if shift_name == "appearance" and cfg.shift_mode not in SUPPORTED_APPEARANCE_MODES:
+            raise ValueError(
+                f"shift_mode '{cfg.shift_mode}' is not valid for shift_name='appearance'. "
+                f"Supported appearance modes: {sorted(SUPPORTED_APPEARANCE_MODES)}"
+            )
+        if shift_name == "physics" and cfg.shift_mode not in SUPPORTED_PHYSICS_MODES:
+            raise ValueError(
+                f"shift_mode '{cfg.shift_mode}' is not valid for shift_name='physics'. "
+                f"Supported physics modes: {sorted(SUPPORTED_PHYSICS_MODES)}"
+            )
+    max_sev = PHYSICS_MAX_SEVERITY.get(cfg.shift_mode, 5)
     for severity in cfg.sweep_severities:
-        if severity < 1 or severity > 5:
-            raise ValueError(f"Expected sweep severity in [1, 5], got {severity}.")
+        if severity < 1 or severity > max_sev:
+            raise ValueError(f"Expected sweep severity in [1, {max_sev}] for shift_mode='{cfg.shift_mode}', got {severity}.")
 
 
 def _map_eval_shift(shift_name: str, sweep_severity: int) -> Tuple[str, int]:
@@ -137,6 +155,9 @@ def _map_eval_shift(shift_name: str, sweep_severity: int) -> Tuple[str, int]:
 
     if shift_name == "appearance":
         return "appearance", sweep_severity
+
+    if shift_name == "physics":
+        return "physics", sweep_severity
 
     raise NotImplementedError(
         f"Shift '{shift_name}' is not implemented yet in run_libero_eval.py."

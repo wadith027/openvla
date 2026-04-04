@@ -37,13 +37,19 @@ import wandb
 # Append current directory so that interpreter can find experiments.robot
 sys.path.append("../..")
 from experiments.robot.libero.libero_utils import (
+    SUPPORTED_APPEARANCE_MODES,
+    SUPPORTED_PHYSICS_MODES,
     SUPPORTED_SHIFT_MODES,
     SUPPORTED_SHIFT_NAMES,
+    apply_physics_shift,
     apply_shift,
     build_episode_shift_state,
     get_libero_dummy_action,
     get_libero_env,
     get_libero_image,
+    get_physics_shift_value,
+    PHYSICS_MAX_SEVERITY,
+    resolve_physics_value,
     quat2axisangle,
     replace_target_textures,
     save_rollout_video,
@@ -86,10 +92,11 @@ class GenerateConfig:
     num_steps_wait: int = 10                         # Number of steps to wait for objects to stabilize in sim
     num_trials_per_task: int = 50                    # Number of rollouts per task
 
-    shift_name: str = "none"                         # Shift family. Options: none, appearance
-    shift_mode: str = "gamma"                        # Shift mode. Options (appearance): noise, blur, gamma, texture
+    shift_name: str = "none"                         # Shift family. Options: none, appearance, physics
+    shift_mode: str = "gamma"                        # Shift mode. Options (appearance): noise, blur, gamma, texture; (physics): object_weight, gripper_strength
     severity: int = 1                                # Shift severity (used when shift_name != none). Range: [1, 5]
     sweep_severity: Optional[int] = None             # Sweep severity label for plotting/aggregation. Range: [1, 5]
+    physics_value_override: Optional[float] = None  # Override the severity-based physics multiplier directly (e.g. 1000.0)
 
     #################################################################################################################
     # Utils
@@ -131,15 +138,30 @@ def validate_shift_config(cfg: GenerateConfig) -> None:
     """Validates shift config values and fails fast on invalid combinations."""
     if cfg.shift_name not in SUPPORTED_SHIFT_NAMES:
         raise ValueError(f"Unexpected shift_name '{cfg.shift_name}'. Supported values: {sorted(SUPPORTED_SHIFT_NAMES)}")
-    if cfg.shift_mode not in SUPPORTED_SHIFT_MODES:
-        raise ValueError(f"Unexpected shift_mode '{cfg.shift_mode}'. Supported values: {sorted(SUPPORTED_SHIFT_MODES)}")
     if cfg.sweep_severity is not None:
         if not isinstance(cfg.sweep_severity, int) or not (1 <= cfg.sweep_severity <= 5):
             raise ValueError(f"Expected sweep_severity to be an integer in [1, 5], got: {cfg.sweep_severity}")
     if cfg.shift_name == "none":
         return
-    if not isinstance(cfg.severity, int) or not (1 <= cfg.severity <= 5):
-        raise ValueError(f"Expected severity to be an integer in [1, 5], got: {cfg.severity}")
+    if cfg.shift_name == "appearance":
+        if cfg.shift_mode not in SUPPORTED_APPEARANCE_MODES:
+            raise ValueError(
+                f"shift_mode '{cfg.shift_mode}' is not valid for shift_name='appearance'. "
+                f"Supported appearance modes: {sorted(SUPPORTED_APPEARANCE_MODES)}"
+            )
+        if not isinstance(cfg.severity, int) or not (1 <= cfg.severity <= 5):
+            raise ValueError(f"Expected severity in [1, 5] for appearance shift, got: {cfg.severity}")
+    elif cfg.shift_name == "physics":
+        if cfg.shift_mode not in SUPPORTED_PHYSICS_MODES:
+            raise ValueError(
+                f"shift_mode '{cfg.shift_mode}' is not valid for shift_name='physics'. "
+                f"Supported physics modes: {sorted(SUPPORTED_PHYSICS_MODES)}"
+            )
+        max_sev = PHYSICS_MAX_SEVERITY[cfg.shift_mode]
+        if not isinstance(cfg.severity, int) or not (1 <= cfg.severity <= max_sev):
+            raise ValueError(
+                f"Expected severity in [1, {max_sev}] for physics shift_mode='{cfg.shift_mode}', got: {cfg.severity}"
+            )
 
 
 @draccus.wrap()
@@ -181,6 +203,8 @@ def eval_libero(cfg: GenerateConfig) -> None:
     run_id += f"--shift={cfg.shift_name}"
     if cfg.shift_name != "none":
         run_id += f"--mode={cfg.shift_mode}--severity={cfg.severity}"
+    if cfg.shift_name == "physics":
+        run_id += f"--value={resolve_physics_value(cfg)}"
     if cfg.sweep_severity is not None:
         run_id += f"--sweep_s={cfg.sweep_severity}"
     if cfg.run_id_note is not None:
@@ -266,7 +290,14 @@ def eval_libero(cfg: GenerateConfig) -> None:
 
             # Reset environment
             env.reset()
-            shift_state = build_episode_shift_state(cfg, resize_size, task_id, episode_idx)
+            if cfg.shift_name in ("none", "appearance"):
+                shift_state = build_episode_shift_state(cfg, resize_size, task_id, episode_idx)
+            else:
+                # Physics shift: appearance pipeline is fully disabled.
+                # Images are passed to the model unmodified.
+                assert cfg.shift_name == "physics", f"Unexpected shift_name: {cfg.shift_name}"
+                shift_state = {"enabled": False}
+                print("[shift] Appearance shift: DISABLED (physics mode — images unmodified)")
 
             texture_shift_info = None
             if shift_state["enabled"] and cfg.shift_mode == "texture":
@@ -274,6 +305,12 @@ def eval_libero(cfg: GenerateConfig) -> None:
 
             # Set initial states
             obs = env.set_init_state(initial_states[episode_idx])
+
+            # IMPORTANT: Apply physics perturbation AFTER set_init_state().
+            # env.reset() / env.set_init_state() resets body_mass and actuator_gear,
+            # so this must be re-applied each episode.
+            if cfg.shift_name == "physics":
+                apply_physics_shift(env, cfg)
 
             # Setup
             t = 0
@@ -294,7 +331,15 @@ def eval_libero(cfg: GenerateConfig) -> None:
 
             print(f"Starting episode {task_episodes+1}...")
             log_file.write(f"Starting episode {task_episodes+1}...\n")
-            if shift_state["enabled"]:
+            if cfg.shift_name == "physics":
+                physics_value = resolve_physics_value(cfg)
+                episode_shift_str = (
+                    f"Episode physics shift: task_id={task_id}, episode_idx={episode_idx}, "
+                    f"mode={cfg.shift_mode}, severity={cfg.severity}, value={physics_value}"
+                )
+                print(episode_shift_str)
+                log_file.write(episode_shift_str + "\n")
+            elif shift_state["enabled"]:
                 if cfg.shift_mode == "texture":
                     swapped_count = 0 if texture_shift_info is None else texture_shift_info["swapped_material_count"]
                     target_count = 0 if texture_shift_info is None else texture_shift_info["target_material_count"]
@@ -472,6 +517,7 @@ def eval_libero(cfg: GenerateConfig) -> None:
         "shift_mode": cfg.shift_mode,
         "severity": cfg.severity,
         "sweep_severity": cfg.sweep_severity,
+        "physics_value": resolve_physics_value(cfg) if cfg.shift_name == "physics" else None,
         "total_episodes": total_episodes,
         "total_successes": total_successes,
         "total_success_rate": total_success_rate,

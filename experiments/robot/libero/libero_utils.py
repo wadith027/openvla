@@ -17,11 +17,20 @@ from libero.libero.envs.textures import get_texture_file_list
 from libero.libero.envs.utils import postprocess_model_xml
 import xml.etree.ElementTree as ET
 
-SUPPORTED_SHIFT_NAMES = {"none", "appearance"}
-SUPPORTED_SHIFT_MODES = {"noise", "blur", "gamma", "texture"}
+SUPPORTED_SHIFT_NAMES = {"none", "appearance", "physics"}
+SUPPORTED_APPEARANCE_MODES = {"noise", "blur", "gamma", "texture"}
+SUPPORTED_PHYSICS_MODES = {"object_weight", "gripper_strength"}
+SUPPORTED_SHIFT_MODES = SUPPORTED_APPEARANCE_MODES | SUPPORTED_PHYSICS_MODES
 SEVERITY_TO_GAMMA_OFFSET = [0.05, 0.10, 0.15, 0.20, 0.25]
 SEVERITY_TO_NOISE_STD = [3.0, 6.0, 9.0, 12.0, 15.0]
 SEVERITY_TO_BLUR_SIGMA = [0.4, 0.8, 1.2, 1.6, 2.0]
+# Physics severity mappings (severity 1 = mildest)
+PHYSICS_OBJECT_WEIGHT_BY_SEVERITY = [10.0, 20.0, 50.0, 100.0, 200.0, 500.0]   # severities 1-6
+PHYSICS_GRIPPER_STRENGTH_BY_SEVERITY = [0.99, 0.9, 0.75, 0.5, 0.1]            # severities 1-5
+PHYSICS_MAX_SEVERITY = {
+    "object_weight": 6,
+    "gripper_strength": 5,
+}
 MAX_BLUR_KERNEL_SIZE = 13
 WALL_GEOM_NAMES = {
     "wall_leftcorner_visual",
@@ -332,6 +341,35 @@ def replace_target_textures(env, severity, seed):
         "target_material_count": sum(len(v) for v in target_materials.values()),
         "swapped_materials": sorted(swapped),
     }
+
+def get_physics_shift_value(shift_mode: str, severity: int) -> float:
+    """Returns the physics perturbation multiplier for a given mode and severity (1-5)."""
+    idx = severity - 1
+    if shift_mode == "object_weight":
+        return PHYSICS_OBJECT_WEIGHT_BY_SEVERITY[idx]
+    elif shift_mode == "gripper_strength":
+        return PHYSICS_GRIPPER_STRENGTH_BY_SEVERITY[idx]
+    raise ValueError(f"Unknown physics shift_mode: '{shift_mode}'. Expected 'object_weight' or 'gripper_strength'.")
+
+
+def resolve_physics_value(cfg) -> float:
+    """Returns the physics multiplier to use, respecting physics_value_override if set."""
+    if getattr(cfg, "physics_value_override", None) is not None:
+        return float(cfg.physics_value_override)
+    return get_physics_shift_value(cfg.shift_mode, cfg.severity)
+
+
+def apply_physics_shift(env, cfg) -> None:
+    """Applies a physics-based perturbation to the LIBERO environment.
+
+    IMPORTANT: Must be called after env.set_init_state() each episode.
+    env.reset() / env.set_init_state() resets body_mass and actuator_gear, so the
+    perturbation must be re-applied every episode, not just once before the loop.
+    """
+    from experiments.robot.libero.perturbations import apply_perturbation
+    value = resolve_physics_value(cfg)
+    apply_perturbation(env, cfg.shift_mode, value)
+
 
 def get_libero_dummy_action(model_family: str):
     """Get dummy/no-op action, used to roll out the simulation while the robot does nothing."""

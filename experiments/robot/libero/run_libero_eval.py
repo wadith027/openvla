@@ -333,7 +333,7 @@ def eval_libero(cfg: GenerateConfig) -> None:
             t = 0
             replay_images = []
             replay_wrist_images = []
-            images = []
+            episode_images = []
             progress = []
             buffer = []
             if cfg.task_suite_name == "libero_spatial":
@@ -504,25 +504,24 @@ def eval_libero(cfg: GenerateConfig) -> None:
                         }
                         if t >= cfg.num_steps_wait:
                             img_path = save_image(img, task_id, episode_idx, t, task_description, cfg.shift_mode, log_file)
-                            images.append(img_path)
-                            if len(images) >= 2:
-                                r.rpush("tta_images", json.dumps({"obs": images, "task_description": task_description}))
+                            episode_images.append(img_path)
+                            r.rpush("tta_images", json.dumps({"obs": episode_images, "task_description": task_description}))
 
-                                _, result_raw = r.blpop("tta_results", timeout=30)
-                                result = json.loads(result_raw)
-                                value_list = result["value_list"]
+                            _, result_raw = r.blpop("tta_results", timeout=30)
+                            result = json.loads(result_raw)
+                            value_list = result["value_list"]
 
-                                if len(value_list) > 0:
-                                    # print(f"value_list[0]: {value_list[0]}")
-                                    log_file.write(f"value_list[-1]: {value_list[-1]}\n")
-                                    log_file.flush()
+                            if len(value_list) > 0:
+                                log_file.write(f"value_list[-1]: {value_list[-1]}\n")
+                                log_file.flush()
 
-                                if len(value_list) >= 2:
-                                    progress.append(value_list[-1] - value_list[-2])
-                        if len(progress) > 0:
-                            entry = (observation, action_tokens, progress[-1], observation_next, log_probs)
-                            buffer.append(entry)
-                        if t >= cfg.num_steps_wait and t % cfg.tta_step == cfg.tta_step-1:
+                                p_t = value_list[-1]
+                                r_t = p_t - progress[-1] if len(progress) > 0 else p_t
+                                progress.append(p_t)
+
+                                entry = (observation_next, action_tokens, r_t, log_probs)
+                                buffer.append(entry)
+                        if t >= cfg.num_steps_wait and t % cfg.tta_step == 0 and len(buffer) > 0:
                             metrics = adapter.update(buffer, task_description, cfg)
                             if metrics is not None:
                                 print("Loss" , metrics.get("loss", "No loss in metrics"))

@@ -24,13 +24,17 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Union
 import subprocess
-import time 
+import time
 import redis
+
+from PIL import Image as PILImage
 
 import draccus
 import numpy as np
 import tqdm
 from libero.libero import benchmark
+from experiments.robot.robomonkey_utils import get_vla_action
+from experiments.robot.libero.perturbations import apply_perturbation
 
 import wandb
 
@@ -84,6 +88,8 @@ class GenerateConfig:
     load_in_4bit: bool = False                       # (For OpenVLA only) Load with 4-bit quantization
 
     center_crop: bool = True                         # Center crop? (if trained w/ random crop image aug)
+    obs_history: int = 1                             # Number of images to pass in from history
+    use_wrist_image: bool = False                    # Use wrist images (doubles the number of input images)
 
     #################################################################################################################
     # LIBERO environment-specific parameters
@@ -129,6 +135,7 @@ class GenerateConfig:
     action_server_port: int = 3200
     reward_server_port: int = 3100
     task_id: int = 0
+    transfer_dir: str = f"./transfer_images/{os.environ.get('SLURM_JOB_ID', 'local')}"
 
     
     # fmt: on
@@ -179,21 +186,31 @@ def eval_libero(cfg: GenerateConfig) -> None:
     # [OpenVLA] Set action un-normalization key
     cfg.unnorm_key = cfg.task_suite_name
 
-    # Load model
-    model = get_model(cfg)
-    
+    os.makedirs(cfg.transfer_dir, exist_ok=True)
 
-    # [OpenVLA] Check that the model contains the action un-normalization key
+    # For other modes: load the model locally.
+    model = None
+    processor = None
+    if cfg.mode != "robomonkey":
+        model = get_model(cfg)
+
+    # [OpenVLA] Resolve the action un-normalization key.
     if cfg.model_family == "openvla":
-        # In some cases, the key must be manually modified (e.g. after training on a modified version of the dataset
-        # with the suffix "_no_noops" in the dataset name)
-        if cfg.unnorm_key not in model.norm_stats and f"{cfg.unnorm_key}_no_noops" in model.norm_stats:
-            cfg.unnorm_key = f"{cfg.unnorm_key}_no_noops"
-        assert cfg.unnorm_key in model.norm_stats, f"Action un-norm key {cfg.unnorm_key} not found in VLA `norm_stats`!"
+        if cfg.mode == "robomonkey":
+            # Load dataset_statistics.json to resolve the key without loading the full model.
+            ds_stats_path = os.path.join(cfg.pretrained_checkpoint, "dataset_statistics.json")
+            if os.path.isfile(ds_stats_path):
+                with open(ds_stats_path) as f:
+                    norm_stats = json.load(f)
+                if cfg.unnorm_key not in norm_stats and f"{cfg.unnorm_key}_no_noops" in norm_stats:
+                    cfg.unnorm_key = f"{cfg.unnorm_key}_no_noops"
+        else:
+            if cfg.unnorm_key not in model.norm_stats and f"{cfg.unnorm_key}_no_noops" in model.norm_stats:
+                cfg.unnorm_key = f"{cfg.unnorm_key}_no_noops"
+            assert cfg.unnorm_key in model.norm_stats, f"Action un-norm key {cfg.unnorm_key} not found in VLA `norm_stats`!"
 
     # [OpenVLA] Get Hugging Face processor
-    processor = None
-    if cfg.model_family == "openvla":
+    if cfg.model_family == "openvla" and cfg.mode != "robomonkey":
         processor = get_processor(cfg)
     if cfg.mode == "ttvla":
         adapter = OnlineAdapter(model=model, processor=processor)
@@ -280,7 +297,7 @@ def eval_libero(cfg: GenerateConfig) -> None:
         initial_states = task_suite.get_task_init_states(task_id)
 
         # Initialize LIBERO environment and task description
-        env, task_description = get_libero_env(task, cfg.model_family, resolution=256)
+        env, task_description = get_libero_env(task, cfg.model_family, resolution=resize_size)
 
         # Start episodes
         task_episodes, task_successes = 0, 0
@@ -315,6 +332,7 @@ def eval_libero(cfg: GenerateConfig) -> None:
             # Setup
             t = 0
             replay_images = []
+            replay_wrist_images = []
             images = []
             progress = []
             buffer = []
@@ -383,11 +401,71 @@ def eval_libero(cfg: GenerateConfig) -> None:
 
                     # Query model to get action
                     if cfg.mode == "robomonkey":
-                        action = get_robomonkey_action(
-                            observation, task_description, cfg,
-                            vla=model, processor=processor,
+                            # use_wrist_image
+                        if cfg.use_wrist_image:
+                            wrist_img = get_libero_image(obs, resize_size, key="robot0_eye_in_hand_image")
+                            replay_wrist_images.append(wrist_img)
+
+                        # buffering #obs_history images, optionally
+                        image_history = replay_images[-cfg.obs_history :]
+                        if len(image_history) < cfg.obs_history:
+                            image_history.extend([replay_images[-1]] * (cfg.obs_history - len(image_history)))
+
+                        # same but for optional wrist images
+                        if cfg.use_wrist_image:
+                            wrist_image_history = replay_wrist_images[-cfg.obs_history :]
+                            if len(wrist_image_history) < cfg.obs_history:
+                                wrist_image_history.extend(
+                                    [replay_wrist_images[-1]] * (cfg.obs_history - len(wrist_image_history))
+                                )
+                            # interleaved images [... image_t, wrist_t ...]
+                            image_history = [val for tup in zip(image_history, wrist_image_history) for val in tup]
+
+                        # Prepare observations dict
+                        # Note: OpenVLA does not take proprio state as input
+                        observation = {
+                            "full_image": image_history,
+                            "state": np.concatenate(
+                                (obs["robot0_eef_pos"], quat2axisangle(obs["robot0_eef_quat"]), obs["robot0_gripper_qpos"])
+                            ),
+                        }
+
+                        # Save raw obs image for reward model BEFORE TF preprocessing
+                        raw_img = obs["agentview_image"][::-1, ::-1]
+                        PILImage.fromarray(raw_img).save(os.path.join(cfg.transfer_dir, "reward_img.jpg"))
+
+                        # Query RoboMonkey pipeline: sample actions from server, score with verifier, pick best
+                        action = get_vla_action(
+                            vla=None,
+                            processor=None,
+                            base_vla_name=cfg.model_family,
+                            obs=observation,
+                            task_label=task_description,
+                            unnorm_key=cfg.unnorm_key,
+                            center_crop=cfg.center_crop,
+                            cfg=cfg,
                         )
-                        action_tokens, log_probs = None, None
+                        # Normalize gripper action [0,1] -> [-1,+1] because the environment expects the latter
+                        action = normalize_gripper_action(action, binarize=True)
+
+                        if cfg.model_family in ["openvla", "prismatic"]:
+                            action = invert_gripper_action(action)
+
+                        # Log every 20 steps
+                        if t % 20 == 0:
+                            np.set_printoptions(precision=4, suppress=True)
+                            print(f"  [t={t}] action: {action}")
+                            log_file.write(f"  [t={t}] action: {action}\n")
+
+                        # Execute action in environment
+                        obs, reward, done, info = env.step(action.tolist())
+                        if done:
+                            task_successes += 1
+                            total_successes += 1
+                            break
+                        t += 1
+                        continue
+
                     else:
                         action, action_tokens, log_probs = get_action_policy(
                             cfg,

@@ -1,4 +1,5 @@
 import os, json, math, requests
+from pathlib import Path
 import numpy as np
 import torch
 import tensorflow as tf
@@ -163,3 +164,150 @@ def _apply_center_crop(image):
     image = tf.clip_by_value(image, 0, 1)
     image = tf.image.convert_image_dtype(image, orig_dtype, saturate=True)
     return Image.fromarray(image.numpy()).convert("RGB")
+
+
+
+def get_batch_actions(instruction, image_path, batch_size, temperature=1.0, cfg=None):
+    """Get multiple action predictions from the VLA action server."""
+    if not os.path.exists(image_path):
+        raise FileNotFoundError(f"Image not found at {image_path}")
+    payload = {
+        "instructions": [instruction] * batch_size,
+        "image_path": image_path,
+        "temperature": temperature,
+    }
+    response = requests.post(
+        f"http://127.0.0.1:{cfg.action_server_port}/batch",
+        json=payload,
+        headers={"Content-Type": "application/json"},
+    )
+    if response.status_code != 200:
+        raise Exception(f"Error from action server: {response.text}")
+    data = response.json()
+    return np.array(data["output_ids"]), np.array(data["actions"])
+
+
+def preprocess_actions(output_ids, actions):
+    output_ids = np.array(output_ids)
+    output_ids = np.where(output_ids == 31745, 31744, output_ids)
+    actions = np.array(actions)
+    mask = np.all((output_ids >= 31744) & (output_ids <= 32000), axis=1)
+    return output_ids[mask], actions[mask]
+
+
+def get_unique_actions(output_ids, actions):
+    output_ids = np.array(output_ids)
+    actions = np.array(actions)
+    _, indices = np.unique(output_ids, axis=0, return_index=True)
+    indices = sorted(indices)
+    return output_ids[indices], actions[indices]
+
+
+def generate_augmented_samples_from_batch(batch_actions, num_samples, unnorm_key, model_name_or_path):
+    mean = np.mean(batch_actions, axis=0)
+    var = np.var(batch_actions, axis=0)
+    augmented = np.random.normal(mean, np.sqrt(var), size=(num_samples, 7))
+    gripper_p = float(np.clip(mean[-1], 0.0, 1.0))
+    augmented[:, -1] = np.random.binomial(1, gripper_p, size=num_samples).astype(float)
+    converter = _get_converter(unnorm_key, model_name_or_path)
+    stats = converter.norm_stats[unnorm_key]["action"]
+    lo, hi = np.array(stats["q01"]), np.array(stats["q99"])
+    augmented[:, :-1] = np.clip(augmented[:, :-1], lo[:-1], hi[:-1])
+    ids = np.array([converter.action_to_token(a) for a in augmented])
+    return ids, augmented
+
+
+def get_rewards(instruction, image_path, action_ids, cfg):
+    rewards = []
+    bs = 2
+    for i in range(math.ceil(len(action_ids) / bs)):
+        batch = action_ids[i * bs:(i + 1) * bs].tolist()
+        r = requests.post(
+            f"http://127.0.0.1:{cfg.reward_server_port}/process",
+            json={"instruction": instruction.lower(), "image_path": image_path, "action": batch},
+            timeout=60,
+        ).json()
+        rewards.extend(r["rewards"])
+    return rewards
+
+
+def get_vla_action(vla, processor, base_vla_name, obs, task_label, unnorm_key, center_crop=False, cfg=None):
+    """Generates an action with the VLA policy."""
+
+    # only supports 1 image
+    if isinstance(obs["full_image"], list):
+        obs["full_image"] = obs["full_image"][0]
+
+    image = Image.fromarray(obs["full_image"])
+    image = image.convert("RGB")
+
+    # (If trained with image augmentations) Center crop image and then resize back up to original size.
+    # IMPORTANT: Let's say crop scale == 0.9. To get the new height and width (post-crop), multiply
+    #            the original height and width by sqrt(0.9) -- not 0.9!
+    if center_crop:
+        batch_size = 1
+        crop_scale = 0.9
+
+        # Convert to TF Tensor and record original data type (should be tf.uint8)
+        image = tf.convert_to_tensor(np.array(image))
+        orig_dtype = image.dtype
+
+        # Convert to data type tf.float32 and values between [0,1]
+        image = tf.image.convert_image_dtype(image, tf.float32)
+
+        # Crop and then resize back to original size
+        image = crop_and_resize(image, crop_scale, batch_size)
+
+        # Convert back to original data type
+        image = tf.clip_by_value(image, 0, 1)
+        image = tf.image.convert_image_dtype(image, orig_dtype, saturate=True)
+
+        # Convert back to PIL Image
+        image = Image.fromarray(image.numpy())
+        image = image.convert("RGB")
+
+        # Save processed image and path for inference
+        transfer_dir = cfg.transfer_dir
+        os.makedirs(transfer_dir, exist_ok=True)
+        image_path = os.path.join(transfer_dir, "vla_processed_img.jpg")
+        image.save(image_path)
+
+    # Get initial action samples from VLA Serving Engine
+    instruction = task_label.lower()
+    image_path = str(Path(os.path.join(cfg.transfer_dir, "vla_processed_img.jpg")).absolute())
+    # Uncomment to debug instruction/image path:
+    # print(f"  [VLA] instruction: '{instruction}'")
+    # print(f"  [VLA] image_path:  {image_path}  exists={os.path.exists(image_path)}")
+    output_ids, actions = get_batch_actions(
+        instruction=instruction,
+        image_path=image_path,
+        batch_size=cfg.initial_samples,
+        temperature=1,
+        cfg=cfg
+    )
+
+    # Preprocess initial actions
+    if cfg.initial_samples == 1 and cfg.augmented_samples == 1:
+        print(f"  [VLA] baseline action (no verifier): {actions[0]}")
+        return actions[0]
+    output_ids, actions = preprocess_actions(output_ids, actions)
+    _, unique = get_unique_actions(output_ids, actions)
+    if len(unique)==1:
+        return unique[0]
+
+    # Generate augmented samples based on the mean and variance of a batch of actions.
+    output_ids, actions = generate_augmented_samples_from_batch(
+        batch_actions=actions,
+        num_samples=cfg.augmented_samples,
+        unnorm_key=cfg.unnorm_key,
+        model_name_or_path=cfg.pretrained_checkpoint,
+    )
+
+    # Score each action with robomonkey verifier
+    output_ids, actions = get_unique_actions(output_ids, actions)
+    reward_img = str(Path(os.path.join(cfg.transfer_dir, "reward_img.jpg")).absolute())
+    rewards = get_rewards(instruction, reward_img, output_ids, cfg=cfg)
+
+    selected_index = np.argmax(rewards)
+
+    return actions[selected_index]

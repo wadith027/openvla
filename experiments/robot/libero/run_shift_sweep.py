@@ -82,6 +82,8 @@ class SweepConfig:
     wandb_entity: str = "YOUR_WANDB_ENTITY"
     load_in_8bit: bool = False
     load_in_4bit: bool = False
+    mode: str = "none"
+    tta_step: int = 5
 
     # fmt: on
 
@@ -242,6 +244,10 @@ def run_shift_sweep(cfg: SweepConfig) -> None:
                     str(cfg.load_in_8bit),
                     "--load_in_4bit",
                     str(cfg.load_in_4bit),
+                    "--mode",
+                    cfg.mode,
+                    "--tta_step",
+                    str(cfg.tta_step),
                 ]
 
                 print(f"\n[{run_idx}/{total_runs}] Launching run: {run_id_note}")

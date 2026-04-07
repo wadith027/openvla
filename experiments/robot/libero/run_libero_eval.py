@@ -257,22 +257,16 @@ def eval_libero(cfg: GenerateConfig) -> None:
     resize_size = get_image_resize_size(cfg)
 
     if cfg.mode == "ttvla":
-        base = Path(os.environ["DATA_DIR"]) 
-        script = base / "vla" / "ttvla"/ "tta.py"
-        python_path = base /"envs"/ "ttvla"/ "bin"/ "python"
+        script = Path(os.environ["TTA_SCRIPT"])
+        socket_path = os.environ["TTA_SOCKET_PATH"]
         ready_token = f"{os.getpid()}-{time.time_ns()}"
         tta_env = os.environ.copy()
         tta_env["TTA_READY_TOKEN"] = ready_token
-
-
-        # Wait for Redis socket to be available and responsive
-        socket_path = f"{os.environ['DATA_DIR']}/tmp/redis.sock"
 
         subprocess.Popen([
             "conda", "run", "--no-capture-output", "-n", "ttvla",
             "python", "-u",
             str(script)
-        # No additional arguments needed for tta.py in this context
         ], env=tta_env)
 
         while True:
@@ -283,7 +277,6 @@ def eval_libero(cfg: GenerateConfig) -> None:
             except redis.ConnectionError:
                 time.sleep(0.5)
 
-        socket_path = f"{os.environ['DATA_DIR']}/tmp/redis.sock"
         r = redis.Redis(unix_socket_path=socket_path)
 
     # Start evaluation

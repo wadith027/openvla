@@ -263,9 +263,11 @@ def eval_libero(cfg: GenerateConfig) -> None:
         tta_env = os.environ.copy()
         tta_env["TTA_READY_TOKEN"] = ready_token
 
+        python_exec = os.path.expandvars("$CONDA_ENVS_DIR/ttvla/bin/python")
+
         subprocess.Popen([
-            "conda", "run", "--no-capture-output", "-n", "ttvla",
-            "python", "-u",
+            python_exec,
+            "-u",
             str(script)
         ], env=tta_env)
 

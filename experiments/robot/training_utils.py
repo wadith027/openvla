@@ -154,7 +154,7 @@ class OnlineAdapter:
         self.optimizer.zero_grad()
         losses = []
 
-        for observation, action, reward, obs_next, logp in buffer:
+        for observation, action, reward, logp in buffer:
             new_logprob = get_logprob_of_action(
                 cfg,
                 self.model,

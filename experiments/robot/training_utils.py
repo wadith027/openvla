@@ -140,7 +140,7 @@ class OnlineAdapter:
             lora_alpha=min(self.cfg.lora_rank, 16),
             lora_dropout=self.cfg.lora_dropout,
             target_modules="all-linear",
-            init_lora_weights="gaussian",
+            init_lora_weights=True,
         )
         model = get_peft_model(model, lora_config)
         model.print_trainable_parameters()

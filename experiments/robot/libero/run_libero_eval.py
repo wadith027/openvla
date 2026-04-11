@@ -513,7 +513,7 @@ def eval_libero(cfg: GenerateConfig) -> None:
                                 log_file.flush()
 
                                 p_t = value_list[-1]
-                                r_t = p_t - progress[-1] if len(progress) > 0 else p_t
+                                r_t = p_t - progress[-1] if len(progress) > 0 else 0.0
                                 progress.append(p_t)
 
                                 entry = (observation_next, action_tokens, r_t, log_probs)

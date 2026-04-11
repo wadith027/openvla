@@ -26,6 +26,7 @@ from typing import Optional, Union
 import subprocess
 import time
 import redis
+import torch
 
 from PIL import Image as PILImage
 
@@ -500,7 +501,7 @@ def eval_libero(cfg: GenerateConfig) -> None:
                         if t >= cfg.num_steps_wait:
                             img_path = save_image(img, task_id, episode_idx, t, task_description, cfg.shift_mode, log_file)
                             episode_images.append(img_path)
-                            r.rpush("tta_images", json.dumps({"obs": episode_images, "task_description": task_description}))
+                            r.rpush("tta_images", json.dumps({"obs": episode_images[-10:], "task_description": task_description}))
 
                             _, result_raw = r.blpop("tta_results", timeout=30)
                             result = json.loads(result_raw)
@@ -532,6 +533,9 @@ def eval_libero(cfg: GenerateConfig) -> None:
 
             task_episodes += 1
             total_episodes += 1
+
+            # Free any cached GPU allocations between episodes to prevent fragmentation OOM
+            torch.cuda.empty_cache()
 
             # Save a replay video of the episode
             save_rollout_video(

@@ -263,6 +263,7 @@ def eval_libero(cfg: GenerateConfig) -> None:
         ready_token = f"{os.getpid()}-{time.time_ns()}"
         tta_env = os.environ.copy()
         tta_env["TTA_READY_TOKEN"] = ready_token
+        tta_env["CUDA_VISIBLE_DEVICES"] = "1"
 
         python_exec = os.path.expandvars("$CONDA_ENVS_DIR/ttvla/bin/python")
 

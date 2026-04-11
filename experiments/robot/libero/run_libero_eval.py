@@ -304,6 +304,8 @@ def eval_libero(cfg: GenerateConfig) -> None:
 
             # Reset environment
             env.reset()
+            if cfg.mode == "ttvla":
+                adapter.reset_episode()
             if cfg.shift_name in ("none", "appearance"):
                 shift_state = build_episode_shift_state(cfg, resize_size, task_id, episode_idx)
             else:
@@ -516,7 +518,7 @@ def eval_libero(cfg: GenerateConfig) -> None:
                                 r_t = p_t - progress[-1] if len(progress) > 0 else 0.0
                                 progress.append(p_t)
 
-                                entry = (observation_next, action_tokens, r_t, log_probs)
+                                entry = (observation, action_tokens, r_t, log_probs)
                                 buffer.append(entry)
                         if t >= cfg.num_steps_wait and t % cfg.tta_step == 0 and len(buffer) > 0:
                             metrics = adapter.update(buffer, task_description, cfg)

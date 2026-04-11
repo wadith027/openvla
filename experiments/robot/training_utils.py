@@ -134,6 +134,16 @@ class OnlineAdapter:
             raise ValueError(f"Invalid reward mode: {self.cfg.reward_mode}")
 
 
+    def reset_episode(self):
+        for module in self.model.modules():
+            if hasattr(module, "lora_A"):
+                for key in module.lora_A:
+                    torch.nn.init.kaiming_uniform_(module.lora_A[key].weight, a=np.sqrt(5))
+            if hasattr(module, "lora_B"):
+                for key in module.lora_B:
+                    torch.nn.init.zeros_(module.lora_B[key].weight)
+        self.optimizer.state.clear()
+
     def _attach_lora(self, model):
         lora_config = LoraConfig(
             r=self.cfg.lora_rank,
@@ -145,6 +155,7 @@ class OnlineAdapter:
         model = get_peft_model(model, lora_config)
         model.print_trainable_parameters()
         return model
+
 
     def update(self, buffer: list, task_description: str, cfg):
         if not buffer:

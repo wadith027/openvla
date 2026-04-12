@@ -607,21 +607,30 @@ def eval_libero(cfg: GenerateConfig) -> None:
 
                             _, result_raw = r.blpop("tta_results", timeout=30)
                             result = json.loads(result_raw)
+                            critic_list = result["critic_list"]
                             value_list = result["value_list"]
 
-                            if len(value_list) > 0:
-                                log_file.write(f"value_list[-1]: {value_list[-1]}\n")
-                                log_file.flush()
+                            if len(critic_list) > 0:
+                                # Use the most recent pairwise critic score as the per-step reward.
+                                # critic_list[-1] measures "did the last action improve progress?"
+                                # (range 0-100, already converted to float in tta.py).
+                                # Dividing by 100 gives a reward in roughly [0, 1].
+                                # This avoids the sliding-window anchor problem of value_list[-1] deltas.
+                                r_t = critic_list[-1] / 100.0
 
-                                p_t = value_list[-1]
-                                r_t = p_t - progress[-1] if len(progress) > 0 else 0.0
+                                # value_list[-1] is still useful for VLAC-gated verification signals.
+                                p_t = value_list[-1] if len(value_list) > 0 else 0.0
                                 progress.append(p_t)
+
+                                log_file.write(f"critic_list[-1]: {critic_list[-1]}  r_t: {r_t:.4f}  p_t: {p_t:.4f}\n")
+                                log_file.flush()
 
                                 if ver_signals is not None:
                                     ver_signals.update_vlac(p_t)
 
-                                entry = (observation, action_tokens, r_t, log_probs)
-                                buffer.append(entry)
+                                if action_tokens is not None:
+                                    entry = (observation, action_tokens, r_t, log_probs)
+                                    buffer.append(entry)
 
                         if t >= cfg.num_steps_wait and t % cfg.tta_step == 0 and len(buffer) > 0:
                             # ── Verification gate (ttvla) ─────────────────────────────────

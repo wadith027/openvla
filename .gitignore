@@ -6,6 +6,8 @@ __pycache__/
 # C extensions
 *.so
 
+logs/
+logs_kwadith/
 # Distribution / packaging
 .Python
 build/
@@ -154,3 +156,6 @@ wandb/
 images/
 log/
 analysis/
+
+
+smoke* 

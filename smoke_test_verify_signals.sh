@@ -1,11 +1,17 @@
 #!/bin/bash
-#SBATCH -o verify_signals_%j.out
-#SBATCH -e verify_signals_%j.err
-#SBATCH -p Quick
-#SBATCH --exclude=GPU41,GPU42
-#SBATCH --mem=60G
-#SBATCH --gpus=1
+
+#!/usr/bin/env bash
+#SBATCH --output=/projects/bgub/openvla-tta/openvla/logs_kwadith/verify_signals_%j.out
+#SBATCH --error=/projects/bgub/openvla-tta/openvla/logs_kwadith/verify_signals_%j.err
+#SBATCH --job-name=smoke_weight_shift
+#SBATCH --account=bgub-delta-gpu
+#SBATCH --partition=gpuA100x4
 #SBATCH --ntasks=1
+#SBATCH --gpus=1
+#SBATCH --mem=32G
+#SBATCH --cpus-per-task=2
+#SBATCH --time=2:00:00
+#SBATCH --chdir=/projects/bgub/openvla-tta/openvla
 
 # Smoke test for verification signals across all 8 shift types.
 # Runs 1 trial per task at a chosen severity so you can see:
@@ -26,7 +32,7 @@
 #   bash smoke_test_verify_signals.sh appearance noise          4
 #   bash smoke_test_verify_signals.sh appearance blur           4
 #   bash smoke_test_verify_signals.sh appearance texture        3
-#   bash smoke_test_verify_signals.sh physics     object_weight 4
+#   bash smoke_test_verify_signals.sh physics object_weight 3
 #   bash smoke_test_verify_signals.sh physics     gripper_strength 4
 #   bash smoke_test_verify_signals.sh control     latency       4
 #   bash smoke_test_verify_signals.sh control     freq_drop     4
@@ -36,15 +42,31 @@
 #   cat experiments/log/<shift_mode>/EVAL-*.signals.jsonl | python -m json.tool | head -80
 #   python -c "import json,pprint; pprint.pprint(json.load(open('experiments/log/<shift_mode>/EVAL-*.metrics.json'))['verification_signals'])"
 
+# Quickest test — just run one shift:
+#   cd /projects/bgub/openvla-tta/openvla
+#   sbatch smoke_test_verify_signals.sh appearance gamma 4
+
+#   Test all 8 shift types (run these one at a time or in parallel):
+#   sbatch smoke_test_verify_signals.sh appearance gamma          4
+#   sbatch smoke_test_verify_signals.sh appearance noise          4
+#   sbatch smoke_test_verify_signals.sh appearance blur           4
+#   sbatch smoke_test_verify_signals.sh appearance texture        3
+#   sbatch smoke_test_verify_signals.sh physics     object_weight 4
+#   sbatch smoke_test_verify_signals.sh physics     gripper_strength 4
+#   sbatch smoke_test_verify_signals.sh control     latency       4
+#   sbatch smoke_test_verify_signals.sh control     freq_drop     4
+
+
 SHIFT_NAME=${1:-appearance}
 SHIFT_MODE=${2:-gamma}
 SEVERITY=${3:-4}
 
-source $(conda info --base)/etc/profile.d/conda.sh
-conda activate openvla
+set -e
+mkdir -p /projects/bgub/openvla-tta/openvla/logs_kwadith
 
-export MUJOCO_GL=osmesa
-export PYOPENGL_PLATFORM=osmesa
+# module load pytorch-conda/2.8
+source /projects/bgub/openvla-tta/env.sh
+
 export PYTHONPATH=.
 
 echo "============================================================"
@@ -56,7 +78,6 @@ echo "  trials     : 1 per task (fast smoke)"
 echo "  mode       : none  (signals computed but TTA gate is advisory only)"
 echo "============================================================"
 
-xvfb-run --auto-servernum -s "-screen 0 640x480x24" \
 python experiments/robot/libero/run_libero_eval.py \
   --model_family openvla \
   --pretrained_checkpoint openvla/openvla-7b-finetuned-libero-spatial \

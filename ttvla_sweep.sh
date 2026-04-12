@@ -7,14 +7,13 @@
 #SBATCH --nodes=1 
 #SBATCH --cpus-per-task=2 
 #SBATCH --gpus-per-node=2 
-#SBATCH --time=24:00:00 
 #SBATCH --gpus=2
 #SBATCH --array=0-29
 
 set -e
 
 source "$(conda info --base)/etc/profile.d/conda.sh"
-source "$(dirname "$0")/../env.sh"
+source "./env.sh"
 
 mkdir -p logs
 

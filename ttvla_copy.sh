@@ -5,9 +5,9 @@
 #SBATCH --partition=gpuA100x4
 #SBATCH --mem=60G
 #SBATCH --cpus-per-task=4 
-#SBATCH --gpus-per-node=1 
+#SBATCH --gpus-per-node=2 
 #SBATCH --time=24:00:00 
-#SBATCH --array=0-1
+#SBATCH --array=0
 
 set -e
 

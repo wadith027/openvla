@@ -68,6 +68,9 @@ mkdir -p /projects/bgub/openvla-tta/openvla/logs_kwadith
 source /projects/bgub/openvla-tta/env.sh
 
 export PYTHONPATH=.
+# Force HuggingFace to use local cache — avoids SSL failure when trying to reach hf.co
+export HF_HUB_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
 
 echo "============================================================"
 echo " Verification Signals Smoke Test"
@@ -78,7 +81,7 @@ echo "  trials     : 1 per task (fast smoke)"
 echo "  mode       : none  (signals computed but TTA gate is advisory only)"
 echo "============================================================"
 
-python experiments/robot/libero/run_libero_eval.py \
+/work/hdd/bgub/conda/envs/openvla/bin/python experiments/robot/libero/run_libero_eval.py \
   --model_family openvla \
   --pretrained_checkpoint openvla/openvla-7b-finetuned-libero-spatial \
   --task_suite_name libero_spatial \

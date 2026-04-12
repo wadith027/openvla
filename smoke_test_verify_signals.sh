@@ -64,11 +64,16 @@ SEVERITY=${3:-4}
 set -e
 mkdir -p /projects/bgub/openvla-tta/openvla/logs_kwadith
 
-# module load pytorch-conda/2.8
 source /projects/bgub/openvla-tta/env.sh
 
+# Match ttvla_copy.sh: clear conda compiler overrides and use system toolchain
+unset CC
+unset CXX
+export CC=/opt/rh/gcc-toolset-13/root/usr/bin/gcc
+export CXX=/opt/rh/gcc-toolset-13/root/usr/bin/g++
+
 export PYTHONPATH=.
-# Force HuggingFace to use local cache — avoids SSL failure when trying to reach hf.co
+# Keep HF offline to avoid any SSL issues reaching huggingface.co
 export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
 
@@ -81,7 +86,7 @@ echo "  trials     : 1 per task (fast smoke)"
 echo "  mode       : none  (signals computed but TTA gate is advisory only)"
 echo "============================================================"
 
-/work/hdd/bgub/conda/envs/openvla/bin/python experiments/robot/libero/run_libero_eval.py \
+python experiments/robot/libero/run_libero_eval.py \
   --model_family openvla \
   --pretrained_checkpoint openvla/openvla-7b-finetuned-libero-spatial \
   --task_suite_name libero_spatial \

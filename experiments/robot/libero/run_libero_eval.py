@@ -347,6 +347,8 @@ def eval_libero(cfg: GenerateConfig) -> None:
             # so this must be re-applied each episode.
             if cfg.shift_name == "physics":
                 apply_physics_shift(env, cfg)
+                
+            control_state = build_control_shift_state(cfg)
 
             control_state = build_control_shift_state(cfg)
 

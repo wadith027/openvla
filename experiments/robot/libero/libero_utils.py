@@ -372,9 +372,16 @@ def apply_physics_shift(env, cfg) -> None:
     apply_perturbation(env, cfg.shift_mode, value)
 
 
+<<<<<<< HEAD
 # Control shift severity mappings (severity 1 = mildest)
 CONTROL_LATENCY_BY_SEVERITY   = [1, 2, 4, 8, 16]
 CONTROL_FREQ_DROP_BY_SEVERITY = [2, 4, 8, 16, 32]
+=======
+
+
+# ── Control shift severity mappings (severity 1 = mildest) ───────────────────
+CONTROL_LATENCY_BY_SEVERITY   = [1, 2, 4, 8, 16]     # steps delayed before first query (severities 1-5)
+CONTROL_FREQ_DROP_BY_SEVERITY = [2, 4, 8, 16, 32]    # repeat chunk every N*chunk_size steps (severities 1-5)
 CONTROL_MAX_SEVERITY = {
     "latency":   5,
     "freq_drop": 5,

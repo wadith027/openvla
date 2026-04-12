@@ -17,10 +17,11 @@ from libero.libero.envs.textures import get_texture_file_list
 from libero.libero.envs.utils import postprocess_model_xml
 import xml.etree.ElementTree as ET
 
-SUPPORTED_SHIFT_NAMES = {"none", "appearance", "physics"}
+SUPPORTED_SHIFT_NAMES = {"none", "appearance", "physics", "control"}
 SUPPORTED_APPEARANCE_MODES = {"noise", "blur", "gamma", "texture"}
 SUPPORTED_PHYSICS_MODES = {"object_weight", "gripper_strength"}
-SUPPORTED_SHIFT_MODES = SUPPORTED_APPEARANCE_MODES | SUPPORTED_PHYSICS_MODES
+SUPPORTED_CONTROL_MODES = {"latency", "freq_drop"}
+SUPPORTED_SHIFT_MODES = SUPPORTED_APPEARANCE_MODES | SUPPORTED_PHYSICS_MODES | SUPPORTED_CONTROL_MODES
 SEVERITY_TO_GAMMA_OFFSET = [0.05, 0.10, 0.15, 0.20, 0.25]
 SEVERITY_TO_NOISE_STD = [3.0, 6.0, 9.0, 12.0, 15.0]
 SEVERITY_TO_BLUR_SIGMA = [0.4, 0.8, 1.2, 1.6, 2.0]
@@ -369,6 +370,59 @@ def apply_physics_shift(env, cfg) -> None:
     from experiments.robot.libero.perturbations import apply_perturbation
     value = resolve_physics_value(cfg)
     apply_perturbation(env, cfg.shift_mode, value)
+
+
+# Control shift severity mappings (severity 1 = mildest)
+CONTROL_LATENCY_BY_SEVERITY   = [1, 2, 4, 8, 16]
+CONTROL_FREQ_DROP_BY_SEVERITY = [2, 4, 8, 16, 32]
+CONTROL_MAX_SEVERITY = {
+    "latency":   5,
+    "freq_drop": 5,
+}
+
+def build_control_shift_state(cfg, chunk_size: int = 1) -> dict:
+    """
+    Builds control shift state for one episode.
+    """
+    if cfg.shift_name != "control":
+        return {"enabled": False, "shift_mode": "none", "severity": 0, "chunk_size": chunk_size, "last_action": None}
+
+    severity_idx = cfg.severity - 1
+    if cfg.shift_mode == "latency":
+        value = CONTROL_LATENCY_BY_SEVERITY[severity_idx]
+    elif cfg.shift_mode == "freq_drop":
+        value = CONTROL_FREQ_DROP_BY_SEVERITY[severity_idx]
+    else:
+        raise ValueError(f"Unknown control shift_mode: '{cfg.shift_mode}'. Expected 'latency' or 'freq_drop'.")
+
+    return {
+        "enabled": True,
+        "shift_mode": cfg.shift_mode,
+        "severity": cfg.severity,
+        "value": value,
+        "chunk_size": chunk_size,
+        "last_action": None,
+    }
+
+
+def should_query_policy(control_state: dict, step: int, action_queue_empty: bool) -> bool:
+    """
+    Decides whether to query the policy at this timestep under a control shift.
+    """
+    if not control_state["enabled"]:
+        return action_queue_empty
+
+    shift_mode = control_state["shift_mode"]
+    value = control_state["value"]
+    chunk_size = control_state["chunk_size"]
+
+    if shift_mode == "latency":
+        return (step >= value) and action_queue_empty
+    elif shift_mode == "freq_drop":
+        effective_period = value * chunk_size
+        return (step % effective_period == 0)
+
+    return action_queue_empty
 
 
 def get_libero_dummy_action(model_family: str):

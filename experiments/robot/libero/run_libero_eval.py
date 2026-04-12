@@ -44,11 +44,15 @@ sys.path.append("../..")
 from experiments.robot.libero.libero_utils import (
     SUPPORTED_APPEARANCE_MODES,
     SUPPORTED_PHYSICS_MODES,
+    SUPPORTED_CONTROL_MODES,
+    CONTROL_MAX_SEVERITY,
     SUPPORTED_SHIFT_MODES,
     SUPPORTED_SHIFT_NAMES,
     apply_physics_shift,
     apply_shift,
     build_episode_shift_state,
+    build_control_shift_state,
+    should_query_policy,
     get_libero_dummy_action,
     get_libero_env,
     get_libero_image,
@@ -99,8 +103,8 @@ class GenerateConfig:
     num_steps_wait: int = 10                         # Number of steps to wait for objects to stabilize in sim
     num_trials_per_task: int = 50                    # Number of rollouts per task
 
-    shift_name: str = "none"                         # Shift family. Options: none, appearance, physics
-    shift_mode: str = "gamma"                        # Shift mode. Options (appearance): noise, blur, gamma, texture; (physics): object_weight, gripper_strength
+    shift_name: str = "none"                         # Shift family. Options: none, appearance, physics, control
+    shift_mode: str = "gamma"                        # Shift mode. Options (appearance): noise, blur, gamma, texture; (physics): object_weight, gripper_strength; (control): latency, freq_drop
     severity: int = 1                                # Shift severity (used when shift_name != none). Range: [1, 5]
     sweep_severity: Optional[int] = None             # Sweep severity label for plotting/aggregation. Range: [1, 5]
     physics_value_override: Optional[float] = None  # Override the severity-based physics multiplier directly (e.g. 1000.0)
@@ -169,6 +173,17 @@ def validate_shift_config(cfg: GenerateConfig) -> None:
         if not isinstance(cfg.severity, int) or not (1 <= cfg.severity <= max_sev):
             raise ValueError(
                 f"Expected severity in [1, {max_sev}] for physics shift_mode='{cfg.shift_mode}', got: {cfg.severity}"
+            )
+    elif cfg.shift_name == "control":
+        if cfg.shift_mode not in SUPPORTED_CONTROL_MODES:
+            raise ValueError(
+                f"shift_mode '{cfg.shift_mode}' is not valid for shift_name='control'. "
+                f"Supported control modes: {sorted(SUPPORTED_CONTROL_MODES)}"
+            )
+        max_sev = CONTROL_MAX_SEVERITY[cfg.shift_mode]
+        if not isinstance(cfg.severity, int) or not (1 <= cfg.severity <= max_sev):
+            raise ValueError(
+                f"Expected severity in [1, {max_sev}] for control shift_mode='{cfg.shift_mode}', got: {cfg.severity}"
             )
 
 
@@ -308,12 +323,17 @@ def eval_libero(cfg: GenerateConfig) -> None:
                 adapter.reset_episode()
             if cfg.shift_name in ("none", "appearance"):
                 shift_state = build_episode_shift_state(cfg, resize_size, task_id, episode_idx)
-            else:
+            elif cfg.shift_name == "physics":
                 # Physics shift: appearance pipeline is fully disabled.
                 # Images are passed to the model unmodified.
-                assert cfg.shift_name == "physics", f"Unexpected shift_name: {cfg.shift_name}"
                 shift_state = {"enabled": False}
                 print("[shift] Appearance shift: DISABLED (physics mode — images unmodified)")
+            else:
+                # Control shift: appearance pipeline is fully disabled.
+                # Images are passed to the model unmodified.
+                assert cfg.shift_name == "control", f"Unexpected shift_name: {cfg.shift_name}"
+                shift_state = {"enabled": False}
+                print("[shift] Appearance shift: DISABLED (control mode — images unmodified)")
 
             texture_shift_info = None
             if shift_state["enabled"] and cfg.shift_mode == "texture":
@@ -328,6 +348,8 @@ def eval_libero(cfg: GenerateConfig) -> None:
             if cfg.shift_name == "physics":
                 apply_physics_shift(env, cfg)
 
+            control_state = build_control_shift_state(cfg)
+
             # Setup
             t = 0
             replay_images = []
@@ -335,6 +357,7 @@ def eval_libero(cfg: GenerateConfig) -> None:
             episode_images = []
             progress = []
             buffer = []
+            last_action = None  # used to repeat last action under control shift (pre-latency / freq_drop)
             if cfg.task_suite_name == "libero_spatial":
                 max_steps = 220  # longest training demo has 193 steps
             elif cfg.task_suite_name == "libero_object":
@@ -353,6 +376,13 @@ def eval_libero(cfg: GenerateConfig) -> None:
                 episode_shift_str = (
                     f"Episode physics shift: task_id={task_id}, episode_idx={episode_idx}, "
                     f"mode={cfg.shift_mode}, severity={cfg.severity}, value={physics_value}"
+                )
+                print(episode_shift_str)
+                log_file.write(episode_shift_str + "\n")
+            elif cfg.shift_name == "control":
+                episode_shift_str = (
+                    f"Episode control shift: task_id={task_id}, episode_idx={episode_idx}, "
+                    f"mode={cfg.shift_mode}, severity={cfg.severity}, value={control_state['value']}"
                 )
                 print(episode_shift_str)
                 log_file.write(episode_shift_str + "\n")
@@ -466,14 +496,20 @@ def eval_libero(cfg: GenerateConfig) -> None:
                         continue
 
                     else:
-                        action, action_tokens, log_probs = get_action_policy(
-                            cfg,
-                            model,
-                            observation,
-                            task_description,
-                            processor=processor,
-                            return_probs=True,
-                        )
+                        step = t - cfg.num_steps_wait
+                        if should_query_policy(control_state, step, last_action is None):
+                            action, action_tokens, log_probs = get_action_policy(
+                                cfg,
+                                model,
+                                observation,
+                                task_description,
+                                processor=processor,
+                                return_probs=True,
+                            )
+                            last_action = action
+                        else:
+                            action = last_action
+                            action_tokens, log_probs = None, None
                     
                     # Normalize gripper action [0,1] -> [-1,+1] because the environment expects the latter
                     action = normalize_gripper_action(action, binarize=True)

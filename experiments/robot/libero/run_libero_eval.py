@@ -25,7 +25,10 @@ from pathlib import Path
 from typing import Optional, Union
 import subprocess
 import time
-import redis
+try:
+    import redis
+except (ImportError, AttributeError):
+    redis = None  # only needed in ttvla mode; may fail in envs without ssl support
 import torch
 
 from PIL import Image as PILImage
@@ -297,6 +300,11 @@ def eval_libero(cfg: GenerateConfig) -> None:
     resize_size = get_image_resize_size(cfg)
 
     if cfg.mode == "ttvla":
+        if redis is None:
+            raise RuntimeError(
+                "redis import failed (likely broken ssl in this env). "
+                "ttvla mode requires redis. Run in the ttvla conda env, or use mode=none."
+            )
         script = Path(os.environ["TTA_SCRIPT"])
         socket_path = os.environ["TTA_SOCKET_PATH"]
         ready_token = f"{os.getpid()}-{time.time_ns()}"

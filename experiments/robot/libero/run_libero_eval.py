@@ -383,10 +383,12 @@ def eval_libero(cfg: GenerateConfig) -> None:
             control_state = build_control_shift_state(cfg)
 
             control_state = build_control_shift_state(cfg)
-            # Verification signals (blind, observation-based TTA gate)
+            # Verification signals (blind, observation-based TTA gate).
+            # Active for all modes when enabled — in mode=none the gate is
+            # advisory only (logged but not enforced).
             ver_signals = (
                 VerificationSignals(cfg.shift_mode, window_size=cfg.verify_window_size)
-                if cfg.enable_verification_signals and cfg.mode in ("ttvla", "robomonkey")
+                if cfg.enable_verification_signals
                 else None
             )
 

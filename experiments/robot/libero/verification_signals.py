@@ -199,14 +199,24 @@ class VerificationSignals:
         """
         Returns (should_adapt: bool, reason: str, signals: dict).
 
+        Default is False — adaptation is only allowed once the window is full
+        and all active gates pass.  This is conservative: if signals are
+        unavailable or ambiguous, we do not adapt.
+
         For ttvla mode all four gates are active.
         For robomonkey mode VLAC-based gates are skipped (no critic signal).
         """
         self._n_tta_opportunities += 1
         signals = self.compute()
 
-        sev = signals.get("severity_score", 0.0)
-        ent = signals.get("action_entropy",  0.0)
+        # Default False until the rolling window is full enough to trust signals
+        if self._n_steps < self.window_size:
+            reason = f"warming_up ({self._n_steps}/{self.window_size} steps)"
+            self._n_tta_skipped += 1
+            return False, reason, signals
+
+        sev = signals.get("severity_score", 1.0)   # default 1.0 = assume severe if missing
+        ent = signals.get("action_entropy",  999.0) # default high = assume uncertain if missing
 
         # Gate 1 — observation severity (all modes)
         if sev > cfg.verify_severity_threshold:

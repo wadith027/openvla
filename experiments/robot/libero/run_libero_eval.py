@@ -668,8 +668,11 @@ def eval_libero(cfg: GenerateConfig) -> None:
                                 
 
                 except Exception as e:
-                    print(f"Caught exception: {e}")
-                    log_file.write(f"Caught exception: {e}\n")
+                    import traceback
+                    tb = traceback.format_exc()
+                    print(f"Caught exception: {e}\n{tb}")
+                    log_file.write(f"Caught exception: {e}\n{tb}\n")
+                    log_file.flush()
                     break
 
             task_episodes += 1

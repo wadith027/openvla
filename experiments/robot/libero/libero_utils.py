@@ -372,13 +372,6 @@ def apply_physics_shift(env, cfg) -> None:
     apply_perturbation(env, cfg.shift_mode, value)
 
 
-<<<<<<< HEAD
-# Control shift severity mappings (severity 1 = mildest)
-CONTROL_LATENCY_BY_SEVERITY   = [1, 2, 4, 8, 16]
-CONTROL_FREQ_DROP_BY_SEVERITY = [2, 4, 8, 16, 32]
-=======
-
-
 # Control shift severity mappings (severity 1 = mildest) 
 
 CONTROL_LATENCY_BY_SEVERITY   = [1, 2, 4, 8, 16]

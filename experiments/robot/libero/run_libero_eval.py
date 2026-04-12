@@ -132,7 +132,7 @@ class GenerateConfig:
 
     # TTA / TTVLA options (used when mode == "ttvla")
     ttvla_env: Optional[str] = 'ttvla'
-    tta_step: int = 5
+    tta_step: int = 8
 
     # RoboMonkey options (used when mode == "robomonkey")
     initial_samples: int = 9

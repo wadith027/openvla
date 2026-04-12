@@ -76,7 +76,7 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 @dataclass
 class OnlineAdaptConfig:
-    learning_rate: float = 5e-4
+    learning_rate: float = 1e-4
     use_lora: bool = True
     lora_rank: int = 32
     lora_dropout: float = 0.0

@@ -20,7 +20,7 @@ Usage:
 import json
 import os
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace as dataclass_replace
 from pathlib import Path
 from typing import Optional, Union
 import subprocess
@@ -78,6 +78,7 @@ from experiments.robot.robot_utils import (
 )
 
 from experiments.robot.training_utils import OnlineAdapter
+from experiments.robot.libero.verification_signals import VerificationSignals
 
 
 @dataclass
@@ -142,7 +143,20 @@ class GenerateConfig:
     task_id: int = 0
     transfer_dir: str = f"./transfer_images/{os.environ.get('SLURM_JOB_ID', 'local')}"
 
-    
+    # ── Verification signal gating (ttvla + robomonkey) ───────────────────────
+    # enable_verification_signals: gate TTA / best-of-N when shift is too severe
+    enable_verification_signals: bool = True
+    # Severity score ∈ [0,1] above which adaptation is skipped (0 = never skip, 1 = always adapt)
+    verify_severity_threshold: float = 0.65
+    # Action entropy (nats) above which adaptation is skipped
+    verify_entropy_threshold: float = 3.5
+    # VLAC pre→post TTA delta below which adaptation is stopped (ttvla only)
+    verify_vlac_delta_threshold: float = -0.05
+    # VLAC progress slope below which adaptation is stopped (ttvla only)
+    verify_vlac_slope_threshold: float = -0.01
+    # Rolling window size for signal computation
+    verify_window_size: int = 10
+
     # fmt: on
 
 
@@ -248,6 +262,16 @@ def eval_libero(cfg: GenerateConfig) -> None:
     log_file = open(local_log_filepath, "w")
     print(f"Logging to local log file: {local_log_filepath}")
 
+    # Verification signal JSONL log (one record per active timestep)
+    signals_log_filepath = os.path.join(cfg.local_log_dir, cfg.shift_mode, run_id + ".signals.jsonl")
+    signals_log_file = open(signals_log_filepath, "w") if cfg.enable_verification_signals else None
+    if signals_log_file:
+        print(f"Logging verification signals to: {signals_log_filepath}")
+
+    # Per-run aggregation for metrics JSON
+    episode_signals_log: list = []
+    total_tta_opportunities, total_tta_skipped = 0, 0
+
     # Initialize Weights & Biases logging as well
     if cfg.use_wandb:
         wandb.init(
@@ -351,6 +375,12 @@ def eval_libero(cfg: GenerateConfig) -> None:
             control_state = build_control_shift_state(cfg)
 
             control_state = build_control_shift_state(cfg)
+            # Verification signals (blind, observation-based TTA gate)
+            ver_signals = (
+                VerificationSignals(cfg.shift_mode, window_size=cfg.verify_window_size)
+                if cfg.enable_verification_signals and cfg.mode in ("ttvla", "robomonkey")
+                else None
+            )
 
             # Setup
             t = 0
@@ -465,6 +495,33 @@ def eval_libero(cfg: GenerateConfig) -> None:
                         raw_img = obs["agentview_image"][::-1, ::-1]
                         PILImage.fromarray(raw_img).save(os.path.join(cfg.transfer_dir, "reward_img.jpg"))
 
+                        # ── Verification gate (robomonkey) ────────────────────────────────
+                        # Feed raw image + robot state to signals BEFORE querying the policy.
+                        rm_gate_ok, rm_reason, rm_signals = True, "signals_disabled", {}
+                        if ver_signals is not None:
+                            # Use a zero-length action as placeholder (no log_probs in robomonkey mode)
+                            _raw_img_for_sig = replay_images[-1] if replay_images else img
+                            _state_for_sig   = observation["state"]
+                            ver_signals.update(_raw_img_for_sig, np.zeros(7), None, _state_for_sig)
+                            rm_gate_ok, rm_reason, rm_signals = ver_signals.should_adapt(cfg)
+                            if t % VerificationSignals.LOG_EVERY == 0:
+                                summary = ver_signals.format_summary(t, episode_idx, task_id,
+                                                                     rm_gate_ok, rm_reason, rm_signals)
+                                print(summary)
+                                log_file.write(summary + "\n")
+                                log_file.flush()
+                            if signals_log_file:
+                                signals_log_file.write(
+                                    ver_signals.format_timestep_record(t, episode_idx, task_id,
+                                                                        rm_gate_ok, rm_reason, rm_signals) + "\n"
+                                )
+
+                        # If shift is too severe, fall back to single-sample inference
+                        _rm_cfg = cfg if rm_gate_ok else dataclass_replace(cfg, initial_samples=1, augmented_samples=1)
+                        if not rm_gate_ok:
+                            print(f"  [VerifySignals] Robomonkey best-of-N SKIPPED → single inference  ({rm_reason})")
+                            log_file.write(f"  [VerifySignals] Robomonkey best-of-N SKIPPED → single inference  ({rm_reason})\n")
+
                         # Query RoboMonkey pipeline: sample actions from server, score with verifier, pick best
                         action = get_vla_action(
                             vla=None,
@@ -474,7 +531,7 @@ def eval_libero(cfg: GenerateConfig) -> None:
                             task_label=task_description,
                             unnorm_key=cfg.unnorm_key,
                             center_crop=cfg.center_crop,
-                            cfg=cfg,
+                            cfg=_rm_cfg,
                         )
                         # Normalize gripper action [0,1] -> [-1,+1] because the environment expects the latter
                         action = normalize_gripper_action(action, binarize=True)
@@ -512,7 +569,11 @@ def eval_libero(cfg: GenerateConfig) -> None:
                         else:
                             action = last_action
                             action_tokens, log_probs = None, None
-                    
+
+                        # Feed raw action (before gripper normalization) into verification signals
+                        if ver_signals is not None and action is not None:
+                            ver_signals.update(img, action.copy(), log_probs, observation["state"])
+
                     # Normalize gripper action [0,1] -> [-1,+1] because the environment expects the latter
                     action = normalize_gripper_action(action, binarize=True)
 
@@ -556,13 +617,43 @@ def eval_libero(cfg: GenerateConfig) -> None:
                                 r_t = p_t - progress[-1] if len(progress) > 0 else 0.0
                                 progress.append(p_t)
 
+                                if ver_signals is not None:
+                                    ver_signals.update_vlac(p_t)
+
                                 entry = (observation, action_tokens, r_t, log_probs)
                                 buffer.append(entry)
+
                         if t >= cfg.num_steps_wait and t % cfg.tta_step == 0 and len(buffer) > 0:
-                            metrics = adapter.update(buffer, task_description, cfg)
-                            if metrics is not None:
-                                print("Loss" , metrics.get("loss", "No loss in metrics"))
-                                log_file.write(f"Loss: {metrics.get('loss', 'No loss in metrics')}\n")
+                            # ── Verification gate (ttvla) ─────────────────────────────────
+                            ttvla_gate_ok, ttvla_reason, ttvla_signals = True, "signals_disabled", {}
+                            if ver_signals is not None:
+                                ttvla_gate_ok, ttvla_reason, ttvla_signals = ver_signals.should_adapt(cfg)
+                                if t % VerificationSignals.LOG_EVERY == 0:
+                                    summary = ver_signals.format_summary(t, episode_idx, task_id,
+                                                                         ttvla_gate_ok, ttvla_reason, ttvla_signals)
+                                    print(summary)
+                                    log_file.write(summary + "\n")
+                                    log_file.flush()
+                                if signals_log_file:
+                                    signals_log_file.write(
+                                        ver_signals.format_timestep_record(t, episode_idx, task_id,
+                                                                            ttvla_gate_ok, ttvla_reason, ttvla_signals) + "\n"
+                                    )
+
+                            if ttvla_gate_ok:
+                                vlac_before = progress[-1] if progress else 0.0
+                                metrics = adapter.update(buffer, task_description, cfg)
+                                vlac_after = progress[-1] if progress else vlac_before
+                                if metrics is not None:
+                                    loss_val = metrics.get("loss", None)
+                                    print(f"  [TTA] Loss={loss_val}  vlac_before={vlac_before:.3f}  vlac_after={vlac_after:.3f}")
+                                    log_file.write(f"  [TTA] Loss={loss_val}  vlac_before={vlac_before:.3f}  vlac_after={vlac_after:.3f}\n")
+                                    log_file.flush()
+                                    if ver_signals is not None and loss_val is not None:
+                                        ver_signals.record_tta_update(float(loss_val), vlac_before, vlac_after)
+                            else:
+                                print(f"  [VerifySignals] TTA update SKIPPED  ({ttvla_reason})")
+                                log_file.write(f"  [VerifySignals] TTA update SKIPPED  ({ttvla_reason})\n")
                                 log_file.flush()
                             buffer = []
                                 
@@ -574,6 +665,16 @@ def eval_libero(cfg: GenerateConfig) -> None:
 
             task_episodes += 1
             total_episodes += 1
+
+            # Collect per-episode verification signal summary
+            if ver_signals is not None:
+                ep_summary = ver_signals.get_episode_summary()
+                ep_summary["episode_idx"] = episode_idx
+                ep_summary["task_id"] = task_id
+                ep_summary["success"] = bool(done)
+                episode_signals_log.append(ep_summary)
+                total_tta_opportunities += ep_summary.get("n_tta_opportunities", 0)
+                total_tta_skipped      += ep_summary.get("n_tta_skipped", 0)
 
             # Free any cached GPU allocations between episodes to prevent fragmentation OOM
             torch.cuda.empty_cache()
@@ -642,6 +743,22 @@ def eval_libero(cfg: GenerateConfig) -> None:
         "total_successes": total_successes,
         "total_success_rate": total_success_rate,
         "per_task": per_task_metrics,
+        "verification_signals": {
+            "enabled": cfg.enable_verification_signals,
+            "per_episode_summaries": episode_signals_log,
+            "adaptation_skip_rate": (
+                total_tta_skipped / total_tta_opportunities
+                if total_tta_opportunities > 0 else None
+            ),
+            "total_tta_opportunities": total_tta_opportunities,
+            "total_tta_skipped": total_tta_skipped,
+            "thresholds": {
+                "verify_severity_threshold": cfg.verify_severity_threshold,
+                "verify_entropy_threshold": cfg.verify_entropy_threshold,
+                "verify_vlac_delta_threshold": cfg.verify_vlac_delta_threshold,
+                "verify_vlac_slope_threshold": cfg.verify_vlac_slope_threshold,
+            },
+        },
     }
 
     if cfg.metrics_output_path is not None:
@@ -655,6 +772,11 @@ def eval_libero(cfg: GenerateConfig) -> None:
     metrics_path_str = str(metrics_output_path)
     print(f"Saved metrics JSON at path {metrics_path_str}")
     log_file.write(f"Saved metrics JSON at path {metrics_path_str}\n")
+
+    # Close verification signals log
+    if signals_log_file:
+        signals_log_file.close()
+        print(f"Saved verification signals log at: {signals_log_filepath}")
 
     # Save local log file after all summary writes complete.
     log_file.close()

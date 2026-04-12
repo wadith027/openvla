@@ -64,7 +64,7 @@ SEVERITY=${3:-4}
 set -e
 mkdir -p /projects/bgub/openvla-tta/openvla/logs_kwadith
 
-source /projects/bgub/openvla-tta/env.sh
+source "./env.sh"
 
 # Match ttvla_copy.sh: clear conda compiler overrides and use system toolchain
 unset CC
@@ -86,7 +86,7 @@ echo "  trials     : 1 per task (fast smoke)"
 echo "  mode       : none  (signals computed but TTA gate is advisory only)"
 echo "============================================================"
 
-python experiments/robot/libero/run_libero_eval.py \
+/work/hdd/bgub/conda/envs/ttvla/bin/python experiments/robot/libero/run_libero_eval.py \
   --model_family openvla \
   --pretrained_checkpoint openvla/openvla-7b-finetuned-libero-spatial \
   --task_suite_name libero_spatial \
@@ -95,7 +95,7 @@ python experiments/robot/libero/run_libero_eval.py \
   --shift_mode ${SHIFT_MODE} \
   --severity ${SEVERITY} \
   --num_trials_per_task 1 \
-  --mode none \
+  --mode ttvla \
   --enable_verification_signals True \
   --verify_severity_threshold 0.65 \
   --verify_entropy_threshold 3.5

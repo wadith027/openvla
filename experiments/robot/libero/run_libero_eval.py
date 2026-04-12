@@ -590,6 +590,9 @@ def eval_libero(cfg: GenerateConfig) -> None:
             log_file.write(f"# successes: {total_successes} ({total_successes / total_episodes * 100:.1f}%)\n")
             log_file.flush()
 
+        # Explicitly close the environment to free the EGL context before GC runs
+        env.close()
+
         # Log final results
         current_task_success_rate = float(task_successes) / float(task_episodes) if task_episodes > 0 else 0.0
         current_total_success_rate = float(total_successes) / float(total_episodes) if total_episodes > 0 else 0.0

@@ -583,6 +583,20 @@ def eval_libero(cfg: GenerateConfig) -> None:
                         # Feed raw action (before gripper normalization) into verification signals
                         if ver_signals is not None and action is not None:
                             ver_signals.update(img, action.copy(), log_probs, observation["state"])
+                            # Write per-timestep record for all modes (ttvla writes its own copy below)
+                            if signals_log_file and cfg.mode != "ttvla":
+                                gate_ok, reason, sig_dict = ver_signals.should_adapt(cfg)
+                                signals_log_file.write(
+                                    ver_signals.format_timestep_record(t, episode_idx, task_id,
+                                                                       gate_ok, reason, sig_dict) + "\n"
+                                )
+                                signals_log_file.flush()
+                                if t % VerificationSignals.LOG_EVERY == 0:
+                                    summary = ver_signals.format_summary(t, episode_idx, task_id,
+                                                                         gate_ok, reason, sig_dict)
+                                    print(summary)
+                                    log_file.write(summary + "\n")
+                                    log_file.flush()
 
                     # Normalize gripper action [0,1] -> [-1,+1] because the environment expects the latter
                     action = normalize_gripper_action(action, binarize=True)

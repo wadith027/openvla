@@ -26,6 +26,7 @@ import draccus
 from experiments.robot.libero.libero_utils import (
     PHYSICS_MAX_SEVERITY,
     SUPPORTED_APPEARANCE_MODES,
+    SUPPORTED_CONTROL_MODES,
     SUPPORTED_PHYSICS_MODES,
     SUPPORTED_SHIFT_MODES,
 )
@@ -142,6 +143,11 @@ def _validate_sweep_cfg(cfg: SweepConfig) -> None:
                 f"shift_mode '{cfg.shift_mode}' is not valid for shift_name='physics'. "
                 f"Supported physics modes: {sorted(SUPPORTED_PHYSICS_MODES)}"
             )
+        if shift_name == "control" and cfg.shift_mode not in SUPPORTED_CONTROL_MODES:
+            raise ValueError(
+                f"shift_mode '{cfg.shift_mode}' is not valid for shift_name='control'. "
+                f"Supported control modes: {sorted(SUPPORTED_CONTROL_MODES)}"
+            )
     max_sev = PHYSICS_MAX_SEVERITY.get(cfg.shift_mode, 5)
     for severity in cfg.sweep_severities:
         if severity < 1 or severity > max_sev:
@@ -160,6 +166,9 @@ def _map_eval_shift(shift_name: str, sweep_severity: int) -> Tuple[str, int]:
 
     if shift_name == "physics":
         return "physics", sweep_severity
+
+    if shift_name == "control":
+        return "control", sweep_severity
 
     raise NotImplementedError(
         f"Shift '{shift_name}' is not implemented yet in run_libero_eval.py."

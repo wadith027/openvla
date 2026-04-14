@@ -3,15 +3,15 @@
 #!/usr/bin/env bash
 #SBATCH --output=/projects/bgub/openvla-tta/openvla/logs_kwadith/verify_signals_%j.out
 #SBATCH --error=/projects/bgub/openvla-tta/openvla/logs_kwadith/verify_signals_%j.err
-#SBATCH --job-name=smoke_weight_shift
+#SBATCH --job-name=smoke_verify
 #SBATCH --account=bgub-delta-gpu
 #SBATCH --partition=gpuA100x4
 #SBATCH --ntasks=1
 #SBATCH --gpus=1
 #SBATCH --mem=32G
 #SBATCH --cpus-per-task=2
+#SBATCH --exclusive # (optional: ensures no other jobs share the same node, which can help with cleaner logs for this smoke test)
 #SBATCH --time=2:00:00
-#SBATCH --chdir=/projects/bgub/openvla-tta/openvla
 
 # Smoke test for verification signals across all 8 shift types.
 # Runs 1 trial per task at a chosen severity so you can see:
@@ -44,7 +44,7 @@
 
 # Quickest test — just run one shift:
 #   cd /projects/bgub/openvla-tta/openvla
-#   sbatch smoke_test_verify_signals.sh appearance gamma 4
+#   sbatch smoke_test_verify_signals.sh physics object_weight 1
 
 #   Test all 8 shift types (run these one at a time or in parallel):
 #   sbatch smoke_test_verify_signals.sh appearance gamma          4
@@ -60,6 +60,8 @@
 SHIFT_NAME=${1:-appearance}
 SHIFT_MODE=${2:-gamma}
 SEVERITY=${3:-4}
+TTA_MODE=none  # signals computed but TTA gate is advisory only (won't actually skip any steps)
+NUM_TRIALS=5  # keep it fast for smoke test
 
 set -e
 mkdir -p /projects/bgub/openvla-tta/openvla/logs_kwadith
@@ -77,25 +79,32 @@ export PYTHONPATH=.
 export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
 
+# Expose both conda envs' CUDA/torch libraries so PyTorch and VLAC (ttvla env) can find them on all nodes
+export LD_LIBRARY_PATH=/work/hdd/bgub/conda/envs/openvla/lib:/work/hdd/bgub/conda/envs/openvla/lib/python3.10/site-packages/torch/lib:/work/hdd/bgub/conda/envs/ttvla/lib:${LD_LIBRARY_PATH}
+
+# Let SLURM manage CUDA_VISIBLE_DEVICES — do not override it
+
+echo "SLURM_JOB_GPUS=${SLURM_JOB_GPUS}  CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}"
+
 echo "============================================================"
 echo " Verification Signals Smoke Test"
 echo "  shift_name : ${SHIFT_NAME}"
 echo "  shift_mode : ${SHIFT_MODE}"
 echo "  severity   : ${SEVERITY}"
-echo "  trials     : 1 per task (fast smoke)"
-echo "  mode       : none  (signals computed but TTA gate is advisory only)"
+echo "  trials     : ${NUM_TRIALS}"
+echo "  mode       : ${TTA_MODE}  (signals computed but TTA gate is advisory only)"
 echo "============================================================"
 
-/work/hdd/bgub/conda/envs/ttvla/bin/python experiments/robot/libero/run_libero_eval.py \
+/work/hdd/bgub/conda/envs/openvla/bin/python experiments/robot/libero/run_libero_eval.py \
   --model_family openvla \
-  --pretrained_checkpoint openvla/openvla-7b-finetuned-libero-spatial \
+  --pretrained_checkpoint /projects/bgub/models/openvla/openvla-7b-finetuned-libero-spatial \
   --task_suite_name libero_spatial \
   --center_crop True \
   --shift_name ${SHIFT_NAME} \
   --shift_mode ${SHIFT_MODE} \
   --severity ${SEVERITY} \
-  --num_trials_per_task 1 \
-  --mode ttvla \
+  --num_trials_per_task ${NUM_TRIALS} \
+  --mode ${TTA_MODE} \
   --enable_verification_signals True \
   --verify_severity_threshold 0.65 \
   --verify_entropy_threshold 3.5

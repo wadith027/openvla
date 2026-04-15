@@ -145,7 +145,7 @@ class GenerateConfig:
 
     # ── Verification signal gating (ttvla + robomonkey) ───────────────────────
     # enable_verification_signals: gate TTA / best-of-N when shift is too severe
-    enable_verification_signals: bool = True
+    enable_verification_signals: bool = False
     # Severity score ∈ [0,1] above which adaptation is skipped (0 = never skip, 1 = always adapt)
     verify_severity_threshold: float = 0.65
     # Action entropy (nats) above which adaptation is skipped

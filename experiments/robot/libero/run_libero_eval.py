@@ -216,6 +216,12 @@ def eval_libero(cfg: GenerateConfig) -> None:
     # Set random seed. Note: small cross-machine variation may remain due to GPU nondeterminism.
     set_seed_everywhere(cfg.seed)
 
+    # ── DIAGNOSTIC: Z-velocity residual ──────────────────────────────────────
+    # Set True to log cmd_z vs delta_z every step for physics shift analysis.
+    # To remove: delete this line and the "# ── DIAGNOSTIC BLOCK" section below.
+    DIAG_VELOCITY_RESIDUAL: bool = True
+    # ─────────────────────────────────────────────────────────────────────────
+
     # [OpenVLA] Set action un-normalization key
     cfg.unnorm_key = cfg.task_suite_name
 
@@ -565,7 +571,7 @@ def eval_libero(cfg: GenerateConfig) -> None:
 
                     else:
                         step = t - cfg.num_steps_wait
-                        if should_query_policy(control_state, step, last_action is None):
+                        if should_query_policy(control_state, step, last_action is None) or last_action is None:
                             action, action_tokens, log_probs = get_action_policy(
                                 cfg,
                                 model,
@@ -605,8 +611,27 @@ def eval_libero(cfg: GenerateConfig) -> None:
                     if cfg.model_family == "openvla":
                         action = invert_gripper_action(action)
 
+                    # ── DIAGNOSTIC BLOCK: Z-velocity residual ────────────────────────────
+                    # Captures cmd_z (policy output) vs actual delta_z (sim response).
+                    # To remove: delete from here to the matching END DIAGNOSTIC comment.
+                    _diag_prev_z = obs["robot0_eef_pos"][2] if DIAG_VELOCITY_RESIDUAL else 0.0
+                    _diag_cmd_z  = float(action[2])         if DIAG_VELOCITY_RESIDUAL else 0.0
+                    # ─────────────────────────────────────────────────────────────────────
+
                     # Execute action in environment
                     obs, reward, done, info = env.step(action.tolist())
+
+                    # ── DIAGNOSTIC BLOCK (continued): log after env.step ─────────────────
+                    if DIAG_VELOCITY_RESIDUAL and t >= cfg.num_steps_wait:
+                        _diag_delta_z = obs["robot0_eef_pos"][2] - _diag_prev_z
+                        _diag_gripper = obs["robot0_gripper_qpos"].mean()
+                        print(
+                            f"[DIAG] ep={episode_idx} task={task_id} t={t:03d} "
+                            f"cmd_z={_diag_cmd_z:+.4f}  delta_z={_diag_delta_z:+.5f}  "
+                            f"gripper_qpos={_diag_gripper:.4f}"
+                        )
+                    # ── END DIAGNOSTIC ───────────────────────────────────────────────────
+
                     if done:
                         task_successes += 1
                         total_successes += 1

@@ -418,7 +418,9 @@ def should_query_policy(control_state: dict, step: int, action_queue_empty: bool
     chunk_size = control_state["chunk_size"]
 
     if shift_mode == "latency":
-        return (step % value == 0)
+        # Query immediately if we have no cached action
+        # Otherwise, simulate latency by holding the last action until step >= value,
+        return action_queue_empty or (step % value == 0)
     elif shift_mode == "freq_drop":
         effective_period = value * chunk_size
         return (step % effective_period == 0)

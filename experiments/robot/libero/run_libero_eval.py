@@ -575,6 +575,10 @@ def eval_libero(cfg: GenerateConfig) -> None:
                             ver_signals.update(img, action.copy(), log_probs, observation["state"])
 
                     # Normalize gripper action [0,1] -> [-1,+1] because the environment expects the latter
+                    # Guard against None
+                    if action is None:
+                        action = np.zeros(7, dtype=np.float64)
+                        action[-1] = 0.5  # gripper neutral — will normalize to -1 (closed)
                     action = normalize_gripper_action(action, binarize=True)
 
                     # [OpenVLA] The dataloader flips the sign of the gripper action to align with other datasets

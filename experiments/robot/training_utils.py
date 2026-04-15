@@ -76,14 +76,15 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 @dataclass
 class OnlineAdaptConfig:
-    learning_rate: float = 1e-4
+    learning_rate: float = 5e-5
     use_lora: bool = True
     lora_rank: int = 32
     lora_dropout: float = 0.0
     center_crop: bool = True
     ppo_clip: float = 0.2
     reward_mode: str = "robomonkey"
-    reward_server_port: int = 3100 
+    reward_server_port: int = 3100
+    max_grad_norm: float = 1.0   # gradient clipping threshold
 
 # @dataclass
 # class RolloutEntry:
@@ -161,11 +162,19 @@ class OnlineAdapter:
         if not buffer:
             return {"num_updates": 0, "buffer_size": 0}
 
+        # Normalize rewards across the buffer so the signal is zero-centered.
+        # Raw VLAC critic scores are in [0, 1]; without centering every action
+        # gets a positive reward and the policy collapses toward a mode.
+        raw_rewards = [r for (_, _, r, _) in buffer]
+        r_mean = float(np.mean(raw_rewards))
+        r_std  = float(np.std(raw_rewards)) + 1e-8
+        normalized_rewards = [(r - r_mean) / r_std for r in raw_rewards]
+
         self.model.train()
         self.optimizer.zero_grad()
         losses = []
 
-        for observation, action, reward, logp in buffer:
+        for (observation, action, _, logp), reward in zip(buffer, normalized_rewards):
             new_logprob = get_logprob_of_action(
                 cfg,
                 self.model,
@@ -184,6 +193,10 @@ class OnlineAdapter:
 
         loss = torch.stack(losses).mean()
         loss.backward()
+        torch.nn.utils.clip_grad_norm_(
+            [p for p in self.model.parameters() if p.requires_grad],
+            self.cfg.max_grad_norm,
+        )
         self.optimizer.step()
         self.model.eval()
 

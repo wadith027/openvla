@@ -6,11 +6,18 @@ case "$(hostname)" in
         export DATA_DIR=/data/dayneguy
         export VLA_DIR=/data/dayneguy/vla
         ;;
+    # dayneguy's USF machine
+    *cse.usf.edu*)
+        export DATA_DIR=/data/dayneguy
+        export VLA_DIR=/data/dayneguy/vla
+        export CONDA_ENVS_DIR=/home/d/dayneguy/conda/envs
+        ;;
     # bgub's machine
     *delta*)
         export DATA_DIR=/work/hdd/bgub
         export VLA_DIR=/projects/bgub/openvla-tta
         export CONDA_ENVS_DIR=/work/hdd/bgub/conda/envs
+        export TTA_MODEL_PATH=/projects/bgub/models/InternRobotics/VLAC-8b
         ;;
     *)
         echo "[env.sh] WARNING: unknown host $(hostname), set DATA_DIR and VLA_DIR manually" >&2

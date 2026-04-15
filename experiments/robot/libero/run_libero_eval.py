@@ -317,6 +317,7 @@ def eval_libero(cfg: GenerateConfig) -> None:
                 r = redis.Redis(unix_socket_path=socket_path)
                 if r.get("tta:ready") == ready_token.encode():
                     break
+                time.sleep(0.1)
             except redis.ConnectionError:
                 time.sleep(0.5)
 
@@ -345,6 +346,7 @@ def eval_libero(cfg: GenerateConfig) -> None:
             env.reset()
             if cfg.mode == "ttvla":
                 adapter.reset_episode()
+                r.delete("tta_images", "tta_results")  # flush any stale items from previous episode
             if cfg.shift_name in ("none", "appearance"):
                 shift_state = build_episode_shift_state(cfg, resize_size, task_id, episode_idx)
             elif cfg.shift_name == "physics":
@@ -373,8 +375,6 @@ def eval_libero(cfg: GenerateConfig) -> None:
                 apply_physics_shift(env, cfg)
                 
             control_state = build_control_shift_state(cfg)
-
-            control_state = build_control_shift_state(cfg)
             # Verification signals (blind, observation-based TTA gate)
             ver_signals = (
                 VerificationSignals(cfg.shift_mode, window_size=cfg.verify_window_size)
@@ -390,6 +390,7 @@ def eval_libero(cfg: GenerateConfig) -> None:
             progress = []
             buffer = []
             last_action = None  # used to repeat last action under control shift (pre-latency / freq_drop)
+            pending_tta_record = None  # (loss, vlac_before) waiting for next p_t to form vlac_after
             if cfg.task_suite_name == "libero_spatial":
                 max_steps = 220  # longest training demo has 193 steps
             elif cfg.task_suite_name == "libero_object":
@@ -609,7 +610,12 @@ def eval_libero(cfg: GenerateConfig) -> None:
                             episode_images.append(img_path)
                             r.rpush("tta_images", json.dumps({"obs": episode_images[-10:], "task_description": task_description}))
 
-                            _, result_raw = r.blpop("tta_results", timeout=30)
+                            blpop_result = r.blpop("tta_results", timeout=30)
+                            if blpop_result is None:
+                                log_file.write(f"  [TTA] tta_results timeout at t={t} — breaking episode\n")
+                                log_file.flush()
+                                break
+                            _, result_raw = blpop_result
                             result = json.loads(result_raw)
                             critic_list = result["critic_list"]
                             value_list = result["value_list"]
@@ -631,6 +637,10 @@ def eval_libero(cfg: GenerateConfig) -> None:
 
                                 if ver_signals is not None:
                                     ver_signals.update_vlac(p_t)
+                                    if pending_tta_record is not None:
+                                        pending_loss, pending_vlac_before = pending_tta_record
+                                        ver_signals.record_tta_update(pending_loss, pending_vlac_before, p_t)
+                                        pending_tta_record = None
 
                                 if action_tokens is not None:
                                     entry = (observation, action_tokens, r_t, log_probs)
@@ -656,14 +666,13 @@ def eval_libero(cfg: GenerateConfig) -> None:
                             if ttvla_gate_ok:
                                 vlac_before = progress[-1] if progress else 0.0
                                 metrics = adapter.update(buffer, task_description, cfg)
-                                vlac_after = progress[-1] if progress else vlac_before
                                 if metrics is not None:
                                     loss_val = metrics.get("loss", None)
-                                    print(f"  [TTA] Loss={loss_val}  vlac_before={vlac_before:.3f}  vlac_after={vlac_after:.3f}")
-                                    log_file.write(f"  [TTA] Loss={loss_val}  vlac_before={vlac_before:.3f}  vlac_after={vlac_after:.3f}\n")
+                                    print(f"  [TTA] Loss={loss_val}  vlac_before={vlac_before:.3f}")
+                                    log_file.write(f"  [TTA] Loss={loss_val}  vlac_before={vlac_before:.3f}\n")
                                     log_file.flush()
                                     if ver_signals is not None and loss_val is not None:
-                                        ver_signals.record_tta_update(float(loss_val), vlac_before, vlac_after)
+                                        pending_tta_record = (float(loss_val), vlac_before)
                             else:
                                 print(f"  [VerifySignals] TTA update SKIPPED  ({ttvla_reason})")
                                 log_file.write(f"  [VerifySignals] TTA update SKIPPED  ({ttvla_reason})\n")

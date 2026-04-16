@@ -162,19 +162,15 @@ class OnlineAdapter:
         if not buffer:
             return {"num_updates": 0, "buffer_size": 0}
 
-        # Normalize rewards across the buffer so the signal is zero-centered.
-        # Raw VLAC critic scores are in [0, 1]; without centering every action
-        # gets a positive reward and the policy collapses toward a mode.
+        # Use raw rewards directly as advantage (Â_t = r_t), matching the paper (Eq. 9).
+        # r_t = p_t - p_{t-1} is already a signed progress-difference signal in roughly [-1, 1].
         raw_rewards = [r for (_, _, r, _) in buffer]
-        r_mean = float(np.mean(raw_rewards))
-        r_std  = float(np.std(raw_rewards)) + 1e-8
-        normalized_rewards = [(r - r_mean) / r_std for r in raw_rewards]
 
         self.model.train()
         self.optimizer.zero_grad()
         losses = []
 
-        for (observation, action, _, logp), reward in zip(buffer, normalized_rewards):
+        for (observation, action, _, logp), reward in zip(buffer, raw_rewards):
             new_logprob = get_logprob_of_action(
                 cfg,
                 self.model,

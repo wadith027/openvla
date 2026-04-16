@@ -632,18 +632,16 @@ def eval_libero(cfg: GenerateConfig) -> None:
                             value_list = result["value_list"]
 
                             if len(critic_list) > 0:
-                                # Use the most recent pairwise critic score as the per-step reward.
-                                # critic_list[-1] measures "did the last action improve progress?"
-                                # (range 0-100, already converted to float in tta.py).
-                                # Dividing by 100 gives a reward in roughly [0, 1].
-                                # This avoids the sliding-window anchor problem of value_list[-1] deltas.
-                                r_t = critic_list[-1] / 100.0
-
-                                # value_list[-1] is still useful for VLAC-gated verification signals.
+                                # Use progress difference as reward: r_t = p_t - p_{t-1} (paper Eq. 7).
+                                # value_list[-1] is the cumulative progress score in [0, 1].
+                                # The difference is naturally signed: positive when the action advances
+                                # the task, negative when it regresses — no normalization needed.
                                 p_t = value_list[-1] if len(value_list) > 0 else 0.0
+                                p_prev = progress[-1] if len(progress) > 0 else 0.0
                                 progress.append(p_t)
+                                r_t = p_t - p_prev
 
-                                log_file.write(f"critic_list[-1]: {critic_list[-1]}  r_t: {r_t:.4f}  p_t: {p_t:.4f}\n")
+                                log_file.write(f"p_prev: {p_prev:.4f}  p_t: {p_t:.4f}  r_t: {r_t:.4f}\n")
                                 log_file.flush()
 
                                 if ver_signals is not None:

@@ -5,9 +5,9 @@
 #SBATCH --partition=gpuA100x4
 #SBATCH --mem=60G
 #SBATCH --cpus-per-task=4 
-#SBATCH --gpus-per-node=2 
-#SBATCH --time=24:00:00 
-#SBATCH --array=0
+#SBATCH --gpus-per-task=2
+#SBATCH --time=24:00:00
+#SBATCH --array=0-73
 
 set -e
 
@@ -24,21 +24,29 @@ export CXX=/opt/rh/gcc-toolset-13/root/usr/bin/g++
 SHIFT_NAMES=()
 SHIFT_MODES=()
 SEVERITIES=()
+TASK_STARTS=()
+TASK_ENDS=()
 
-for sev in 2 1;   do SHIFT_NAMES+=(appearance); SHIFT_MODES+=(noise);            SEVERITIES+=($sev); done
-
-#for sev in 1 2 3 4 5;   do SHIFT_NAMES+=(appearance); SHIFT_MODES+=(gamma);            SEVERITIES+=($sev); done
-#for sev in 1 2 3 4 5;   do SHIFT_NAMES+=(appearance); SHIFT_MODES+=(noise);            SEVERITIES+=($sev); done
-#for sev in 1 2 3 4 5;   do SHIFT_NAMES+=(appearance); SHIFT_MODES+=(blur);             SEVERITIES+=($sev); done
-#for sev in 1 2 3 4;     do SHIFT_NAMES+=(appearance); SHIFT_MODES+=(texture);          SEVERITIES+=($sev); done
-#for sev in 1 2 3 4 5 6; do SHIFT_NAMES+=(physics);    SHIFT_MODES+=(object_weight);    SEVERITIES+=($sev); done
-#for sev in 1 2 3 4 5;   do SHIFT_NAMES+=(physics);    SHIFT_MODES+=(gripper_strength); SEVERITIES+=($sev); done
+# Full sweep: 74 jobs = 37 conditions × 2 task-range halves (0–4, 5–9)
+#   appearance: gamma(5) + noise(4) + blur(4) + texture(3) = 19 conditions
+#   physics:    object_weight(6) + gripper_strength(5)     = 11 conditions
+#   control:    latency(5) + freq_drop(5)                  = 10 conditions
+for sev in 1 2 3 4 5;   do for half in "0 4" "5 9"; do SHIFT_NAMES+=(appearance); SHIFT_MODES+=(gamma);            SEVERITIES+=($sev); TASK_STARTS+=(${half% *}); TASK_ENDS+=(${half#* }); done; done
+for sev in 2 3 4 5;   do for half in "0 4" "5 9"; do SHIFT_NAMES+=(appearance); SHIFT_MODES+=(noise);            SEVERITIES+=($sev); TASK_STARTS+=(${half% *}); TASK_ENDS+=(${half#* }); done; done
+for sev in 2 3 4 5;   do for half in "0 4" "5 9"; do SHIFT_NAMES+=(appearance); SHIFT_MODES+=(blur);             SEVERITIES+=($sev); TASK_STARTS+=(${half% *}); TASK_ENDS+=(${half#* }); done; done
+for sev in 2 3 4;     do for half in "0 4" "5 9"; do SHIFT_NAMES+=(appearance); SHIFT_MODES+=(texture);          SEVERITIES+=($sev); TASK_STARTS+=(${half% *}); TASK_ENDS+=(${half#* }); done; done
+for sev in 1 2 3 4 5 6; do for half in "0 4" "5 9"; do SHIFT_NAMES+=(physics);    SHIFT_MODES+=(object_weight);    SEVERITIES+=($sev); TASK_STARTS+=(${half% *}); TASK_ENDS+=(${half#* }); done; done
+for sev in 1 2 3 4 5;   do for half in "0 4" "5 9"; do SHIFT_NAMES+=(physics);    SHIFT_MODES+=(gripper_strength); SEVERITIES+=($sev); TASK_STARTS+=(${half% *}); TASK_ENDS+=(${half#* }); done; done
+for sev in 1 2 3 4 5;   do for half in "0 4" "5 9"; do SHIFT_NAMES+=(control);    SHIFT_MODES+=(latency);          SEVERITIES+=($sev); TASK_STARTS+=(${half% *}); TASK_ENDS+=(${half#* }); done; done
+for sev in 1 2 3 4 5;   do for half in "0 4" "5 9"; do SHIFT_NAMES+=(control);    SHIFT_MODES+=(freq_drop);        SEVERITIES+=($sev); TASK_STARTS+=(${half% *}); TASK_ENDS+=(${half#* }); done; done
 
 SHIFT_NAME=${SHIFT_NAMES[$SLURM_ARRAY_TASK_ID]}
 SHIFT_MODE=${SHIFT_MODES[$SLURM_ARRAY_TASK_ID]}
 SEVERITY=${SEVERITIES[$SLURM_ARRAY_TASK_ID]}
+TASK_START=${TASK_STARTS[$SLURM_ARRAY_TASK_ID]}
+TASK_END=${TASK_ENDS[$SLURM_ARRAY_TASK_ID]}
 
-echo "Task $SLURM_ARRAY_TASK_ID: shift_name=$SHIFT_NAME shift_mode=$SHIFT_MODE severity=$SEVERITY"
+echo "Task $SLURM_ARRAY_TASK_ID: shift_name=$SHIFT_NAME shift_mode=$SHIFT_MODE severity=$SEVERITY tasks=$TASK_START-$TASK_END"
 
 
 # Override socket path
@@ -58,11 +66,13 @@ python experiments/robot/libero/run_libero_eval.py \
   --task_suite_name "$TASK_SUITE" \
   --center_crop True \
   --num_trials_per_task $N_TRIALS \
+  --task_start $TASK_START \
+  --task_end $TASK_END \
   --shift_name "$SHIFT_NAME" \
   --shift_mode "$SHIFT_MODE" \
   --severity $SEVERITY \
   --sweep_severity $SEVERITY \
   --mode ttvla \
   --tta_step $TTA_STEP \
-  --run_id_note "ttvla_sweep__${SHIFT_NAME}_${SHIFT_MODE}_s${SEVERITY}" \
+  --run_id_note "ttvla_sweep__${SHIFT_NAME}_${SHIFT_MODE}_s${SEVERITY}_t${TASK_START}-${TASK_END}" \
   --transfer_dir "./transfer_images/${SLURM_ARRAY_JOB_ID}_${SLURM_ARRAY_TASK_ID}"

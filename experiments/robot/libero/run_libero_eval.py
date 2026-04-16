@@ -103,6 +103,8 @@ class GenerateConfig:
     task_suite_name: str = "libero_spatial"          # Task suite. Options: libero_spatial, libero_object, libero_goal, libero_10, libero_90
     num_steps_wait: int = 10                         # Number of steps to wait for objects to stabilize in sim
     num_trials_per_task: int = 50                    # Number of rollouts per task
+    task_start: int = 0                              # First task index to evaluate (inclusive)
+    task_end: Optional[int] = None                   # Last task index to evaluate (inclusive); None = run all tasks
 
     shift_name: str = "none"                         # Shift family. Options: none, appearance, physics, control
     shift_mode: str = "gamma"                        # Shift mode. Options (appearance): noise, blur, gamma, texture; (physics): object_weight, gripper_strength; (control): latency, freq_drop
@@ -323,10 +325,19 @@ def eval_libero(cfg: GenerateConfig) -> None:
 
         r = redis.Redis(unix_socket_path=socket_path)
 
+    # Resolve task range
+    task_start = cfg.task_start
+    task_end = cfg.task_end if cfg.task_end is not None else num_tasks_in_suite - 1
+    assert 0 <= task_start <= task_end < num_tasks_in_suite, (
+        f"task_start={task_start} / task_end={task_end} out of range for suite with {num_tasks_in_suite} tasks"
+    )
+    print(f"Evaluating tasks {task_start}–{task_end} (of {num_tasks_in_suite})")
+    log_file.write(f"Evaluating tasks {task_start}–{task_end} (of {num_tasks_in_suite})\n")
+
     # Start evaluation
     total_episodes, total_successes = 0, 0
     per_task_metrics = []
-    for task_id in tqdm.tqdm(range(num_tasks_in_suite)):
+    for task_id in tqdm.tqdm(range(task_start, task_end + 1)):
         # Get task
         task = task_suite.get_task(task_id)
 

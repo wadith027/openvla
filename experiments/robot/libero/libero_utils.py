@@ -411,14 +411,14 @@ def should_query_policy(control_state: dict, step: int, action_queue_empty: bool
     Decides whether to query the policy at this timestep under a control shift.
     """
     if not control_state["enabled"]:
-        return action_queue_empty
+        return True  # no control shift → query the model every step
 
     shift_mode = control_state["shift_mode"]
     value = control_state["value"]
     chunk_size = control_state["chunk_size"]
 
     if shift_mode == "latency":
-        return (step >= value) and action_queue_empty
+        return step >= value
     elif shift_mode == "freq_drop":
         effective_period = value * chunk_size
         return (step % effective_period == 0)

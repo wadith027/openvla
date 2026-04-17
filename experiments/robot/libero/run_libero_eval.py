@@ -159,6 +159,10 @@ class GenerateConfig:
     verify_vlac_slope_threshold: float = -0.01
     # Rolling window size for signal computation
     verify_window_size: int = 10
+    # Accumulative progress estimation (ttvla only, paper §3.3)
+    acc_milestone_steps: int = 64          # save milestone frame every N active steps (Δmilestone)
+    verify_acc_slope_threshold: float = -0.02  # acc progress slope below this → stop TTA
+    verify_acc_min_threshold: float = 0.05     # acc progress below this (after 5 updates) → stop TTA
 
     # fmt: on
 
@@ -215,12 +219,6 @@ def eval_libero(cfg: GenerateConfig) -> None:
 
     # Set random seed. Note: small cross-machine variation may remain due to GPU nondeterminism.
     set_seed_everywhere(cfg.seed)
-
-    # ── DIAGNOSTIC: Z-velocity residual ──────────────────────────────────────
-    # Set True to log cmd_z vs delta_z every step for physics shift analysis.
-    # To remove: delete this line and the "# ── DIAGNOSTIC BLOCK" section below.
-    DIAG_VELOCITY_RESIDUAL: bool = True
-    # ─────────────────────────────────────────────────────────────────────────
 
     # [OpenVLA] Set action un-normalization key
     cfg.unnorm_key = cfg.task_suite_name
@@ -403,6 +401,7 @@ def eval_libero(cfg: GenerateConfig) -> None:
             replay_wrist_images = []
             episode_images = []
             progress = []
+            milestone_image_path = None   # most recent milestone for accumulative progress
             buffer = []
             last_action = None  # used to repeat last action under control shift (pre-latency / freq_drop)
             if cfg.task_suite_name == "libero_spatial":
@@ -611,26 +610,8 @@ def eval_libero(cfg: GenerateConfig) -> None:
                     if cfg.model_family == "openvla":
                         action = invert_gripper_action(action)
 
-                    # ── DIAGNOSTIC BLOCK: Z-velocity residual ────────────────────────────
-                    # Captures cmd_z (policy output) vs actual delta_z (sim response).
-                    # To remove: delete from here to the matching END DIAGNOSTIC comment.
-                    _diag_prev_z = obs["robot0_eef_pos"][2] if DIAG_VELOCITY_RESIDUAL else 0.0
-                    _diag_cmd_z  = float(action[2])         if DIAG_VELOCITY_RESIDUAL else 0.0
-                    # ─────────────────────────────────────────────────────────────────────
-
                     # Execute action in environment
                     obs, reward, done, info = env.step(action.tolist())
-
-                    # ── DIAGNOSTIC BLOCK (continued): log after env.step ─────────────────
-                    if DIAG_VELOCITY_RESIDUAL and t >= cfg.num_steps_wait:
-                        _diag_delta_z = obs["robot0_eef_pos"][2] - _diag_prev_z
-                        _diag_gripper = obs["robot0_gripper_qpos"].mean()
-                        print(
-                            f"[DIAG] ep={episode_idx} task={task_id} t={t:03d} "
-                            f"cmd_z={_diag_cmd_z:+.4f}  delta_z={_diag_delta_z:+.5f}  "
-                            f"gripper_qpos={_diag_gripper:.4f}"
-                        )
-                    # ── END DIAGNOSTIC ───────────────────────────────────────────────────
 
                     if done:
                         task_successes += 1
@@ -651,7 +632,22 @@ def eval_libero(cfg: GenerateConfig) -> None:
                         if t >= cfg.num_steps_wait:
                             img_path = save_image(img, task_id, episode_idx, t, task_description, cfg.shift_mode, log_file)
                             episode_images.append(img_path)
-                            r.rpush("tta_images", json.dumps({"obs": episode_images[-10:], "task_description": task_description}))
+
+                            # ── Accumulative progress: milestone tracking (paper §3.3) ──────
+                            # Save a milestone frame at the first active step and every
+                            # acc_milestone_steps thereafter.  The VLAC query always compares
+                            # the current frame to the MOST RECENT milestone (not the initial
+                            # frame), which keeps the critic stable for long-horizon tasks.
+                            active_step = t - cfg.num_steps_wait
+                            if milestone_image_path is None or active_step % cfg.acc_milestone_steps == 0:
+                                milestone_image_path = img_path
+                            # ─────────────────────────────────────────────────────────────────
+
+                            # Query VLAC: [milestone_frame, current_frame] → incremental c_t
+                            r.rpush("tta_images", json.dumps({
+                                "obs": [milestone_image_path, img_path],
+                                "task_description": task_description,
+                            }))
 
                             _, result_raw = r.blpop("tta_results", timeout=30)
                             result = json.loads(result_raw)
@@ -661,12 +657,15 @@ def eval_libero(cfg: GenerateConfig) -> None:
                                 log_file.write(f"value_list[-1]: {value_list[-1]}\n")
                                 log_file.flush()
 
-                                p_t = value_list[-1]
+                                # c_t ∈ [-1, 1]: incremental progress from milestone to now
+                                c_t = float(value_list[-1])
+                                p_t = c_t
                                 r_t = p_t - progress[-1] if len(progress) > 0 else 0.0
                                 progress.append(p_t)
 
                                 if ver_signals is not None:
                                     ver_signals.update_vlac(p_t)
+                                    ver_signals.update_accumulative_progress(c_t)
 
                                 entry = (observation, action_tokens, r_t, log_probs)
                                 buffer.append(entry)

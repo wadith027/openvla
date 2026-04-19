@@ -163,7 +163,10 @@ class GenerateConfig:
     acc_milestone_steps: int = 64          # save milestone frame every N active steps (Δmilestone)
     verify_acc_slope_threshold: float = -0.02  # acc progress slope below this → stop TTA
     verify_acc_min_threshold: float = 0.05     # acc progress below this (after 5 updates) → stop TTA
-
+    # Demo collection
+    save_demos: bool = False    # Whether to save successful demos to HDF5
+    demo_output_dir: str = "/projects/bgub/openvla-tta/openvla/experiments/shifted_demos"  # Output directory for HDF5 demos
+    
     # fmt: on
 
 
@@ -404,6 +407,13 @@ def eval_libero(cfg: GenerateConfig) -> None:
             milestone_image_path = None   # most recent milestone for accumulative progress
             buffer = []
             last_action = None  # used to repeat last action under control shift (pre-latency / freq_drop)
+            ep_agentview_images = []
+            ep_wrist_images = []
+            ep_ee_states = []
+            ep_gripper_states = []
+            ep_joint_states = []
+            ep_actions_raw = []
+            ep_sim_states = []
             if cfg.task_suite_name == "libero_spatial":
                 max_steps = 220  # longest training demo has 193 steps
             elif cfg.task_suite_name == "libero_object":
@@ -558,7 +568,7 @@ def eval_libero(cfg: GenerateConfig) -> None:
                             np.set_printoptions(precision=4, suppress=True)
                             print(f"  [t={t}] action: {action}")
                             log_file.write(f"  [t={t}] action: {action}\n")
-
+                                       
                         # Execute action in environment
                         obs, reward, done, info = env.step(action.tolist())
                         if done:
@@ -583,6 +593,16 @@ def eval_libero(cfg: GenerateConfig) -> None:
                         else:
                             action = last_action
                             action_tokens, log_probs = None, None
+                        
+                        # Buffer raw observations for demo saving
+                        if cfg.save_demos:
+                            ep_agentview_images.append(obs["agentview_image"].copy())
+                            ep_wrist_images.append(obs["robot0_eye_in_hand_image"].copy())
+                            ep_ee_states.append(np.concatenate([obs["robot0_eef_pos"], quat2axisangle(obs["robot0_eef_quat"])]))
+                            ep_gripper_states.append(obs["robot0_gripper_qpos"].copy())
+                            ep_joint_states.append(obs["robot0_joint_pos"].copy())
+                            ep_sim_states.append(env.sim.get_state().flatten())
+                            ep_actions_raw.append(last_action.copy())
 
                         # Feed raw action (before gripper normalization) into verification signals
                         if ver_signals is not None and action is not None:
@@ -616,6 +636,25 @@ def eval_libero(cfg: GenerateConfig) -> None:
                     if done:
                         task_successes += 1
                         total_successes += 1
+                        if cfg.save_demos:
+                            import h5py, time as _time
+                            out_dir = os.path.join(cfg.demo_output_dir, cfg.shift_mode, f"sev_{cfg.severity}", f"task_{task_id:02d}")
+                            os.makedirs(out_dir, exist_ok=True)
+                            hdf5_path = os.path.join(out_dir, f"demo_{int(_time.time()*1000)}.hdf5")
+                            with h5py.File(hdf5_path, "w") as hf:
+                                grp = hf.create_group("data/demo_0")
+                                obs_grp = grp.create_group("obs")
+                                obs_grp.create_dataset("agentview_rgb", data=np.stack(ep_agentview_images))
+                                obs_grp.create_dataset("eye_in_hand_rgb", data=np.stack(ep_wrist_images))
+                                obs_grp.create_dataset("ee_states", data=np.stack(ep_ee_states))
+                                obs_grp.create_dataset("gripper_states", data=np.stack(ep_gripper_states))
+                                obs_grp.create_dataset("joint_states", data=np.stack(ep_joint_states))
+                                grp.create_dataset("actions", data=np.stack(ep_actions_raw))
+                                grp.create_dataset("states", data=np.stack(ep_sim_states))
+                                dones = np.zeros(len(ep_actions_raw), dtype=np.uint8)
+                                dones[-1] = 1
+                                grp.create_dataset("dones", data=dones)
+                            print(f"  Saved demo to {hdf5_path}")
                         break
                     t += 1
 
@@ -666,6 +705,8 @@ def eval_libero(cfg: GenerateConfig) -> None:
                                 if ver_signals is not None:
                                     ver_signals.update_vlac(p_t)
                                     ver_signals.update_accumulative_progress(c_t)
+                                    # ── ACC_PROGRESS per-step log (remove when done) ──
+                                    print(f"[ACC] ep={episode_idx} task={task_id} t={t:04d} c_t={c_t:+.3f} v={ver_signals._acc_progress:.4f}")
 
                                 entry = (observation, action_tokens, r_t, log_probs)
                                 buffer.append(entry)

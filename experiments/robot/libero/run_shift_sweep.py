@@ -85,6 +85,12 @@ class SweepConfig:
     load_in_4bit: bool = False
     mode: str = "none"
     tta_step: int = 5
+    #################################################################################################################
+    # Save demos
+    #################################################################################################################
+    save_demos: bool = False
+    demo_output_dir: str = "/projects/bgub/openvla-tta/openvla/experiments/shifted_demos"
+    
 
     # fmt: on
 
@@ -257,6 +263,10 @@ def run_shift_sweep(cfg: SweepConfig) -> None:
                     cfg.mode,
                     "--tta_step",
                     str(cfg.tta_step),
+                    "--save_demos",
+                    str(cfg.save_demos),
+                    "--demo_output_dir",
+                    cfg.demo_output_dir,
                 ]
 
                 print(f"\n[{run_idx}/{total_runs}] Launching run: {run_id_note}")

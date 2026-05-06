@@ -400,7 +400,7 @@ def eval_libero(cfg: GenerateConfig) -> None:
             episode_images = []
             progress = []
             buffer = []
-            last_action = None  # used to repeat last action under control shift (pre-latency / freq_drop)
+            last_action = None  
             pending_tta_record = None  # (loss, vlac_before) waiting for next p_t to form vlac_after
             if cfg.task_suite_name == "libero_spatial":
                 max_steps = 220  # longest training demo has 193 steps
@@ -579,7 +579,7 @@ def eval_libero(cfg: GenerateConfig) -> None:
                             )
                             last_action = action
                         else:
-                            action = last_action
+                            action = None
                             action_tokens, log_probs = None, None
 
                         # Feed raw action (before gripper normalization) into verification signals
@@ -587,16 +587,12 @@ def eval_libero(cfg: GenerateConfig) -> None:
                             ver_signals.update(img, action.copy(), log_probs, observation["state"])
 
                     # Normalize gripper action [0,1] -> [-1,+1] because the environment expects the latter
-                    # Guard against None
                     if action is None:
-                        action = np.zeros(7, dtype=np.float64)
-                        action[-1] = 0.5  # gripper neutral — will normalize to -1 (closed)
-                    action = normalize_gripper_action(action, binarize=True)
-
-                    # [OpenVLA] The dataloader flips the sign of the gripper action to align with other datasets
-                    # (0 = close, 1 = open), so flip it back (-1 = open, +1 = close) before executing the action
-                    if cfg.model_family == "openvla":
-                        action = invert_gripper_action(action)
+                        action = np.asarray(get_libero_dummy_action(cfg.model_family), dtype=np.float64)
+                    else:
+                        action = normalize_gripper_action(action, binarize=True)
+                        if cfg.model_family == "openvla":
+                            action = invert_gripper_action(action)
 
                     # Execute action in environment
                     obs, reward, done, info = env.step(action.tolist())

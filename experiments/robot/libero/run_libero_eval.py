@@ -147,25 +147,16 @@ class GenerateConfig:
     transfer_dir: str = f"./transfer_images/{os.environ.get('SLURM_JOB_ID', 'local')}"
 
     # ── Verification signal gating (ttvla + robomonkey) ───────────────────────
-    # enable_verification_signals: gate TTA / best-of-N when shift is too severe
     enable_verification_signals: bool = True
-    # Severity score ∈ [0,1] above which adaptation is skipped (0 = never skip, 1 = always adapt)
-    verify_severity_threshold: float = 0.65
-    # Action entropy (nats) above which adaptation is skipped
-    verify_entropy_threshold: float = 3.5
-    # VLAC pre→post TTA delta below which adaptation is stopped (ttvla only)
-    verify_vlac_delta_threshold: float = -0.05
-    # VLAC progress slope below which adaptation is stopped (ttvla only)
-    verify_vlac_slope_threshold: float = -0.01
-    # Rolling window size for signal computation
-    verify_window_size: int = 10
-    # Accumulative progress estimation (ttvla only, paper §3.3)
-    acc_milestone_steps: int = 64          # save milestone frame every N active steps (Δmilestone)
-    verify_acc_slope_threshold: float = -0.02  # acc progress slope below this → stop TTA
-    verify_acc_min_threshold: float = 0.05     # acc progress below this (after 5 updates) → stop TTA
+    # ρ_cmd threshold τ: gate fires when cmd–delta mismatch exceeds this (paper §3.4, Eq. 7)
+    verify_cmd_mismatch_threshold: float = 0.25
+    # Rolling window size W for ρ_cmd computation (paper uses W=20)
+    verify_window_size: int = 20
+    # Accumulative progress milestone tracking (ttvla only, paper §3.3)
+    acc_milestone_steps: int = 64
     # Demo collection
     save_demos: bool = False    # Whether to save successful demos to HDF5
-    demo_output_dir: str = "/projects/bgub/openvla-tta/openvla/experiments/shifted_demos"  # Output directory for HDF5 demos
+    demo_output_dir: str = "experiments/shifted_demos"  # Output directory for HDF5 demos
     
     # fmt: on
 
@@ -175,8 +166,8 @@ def validate_shift_config(cfg: GenerateConfig) -> None:
     if cfg.shift_name not in SUPPORTED_SHIFT_NAMES:
         raise ValueError(f"Unexpected shift_name '{cfg.shift_name}'. Supported values: {sorted(SUPPORTED_SHIFT_NAMES)}")
     if cfg.sweep_severity is not None:
-        if not isinstance(cfg.sweep_severity, int) or not (1 <= cfg.sweep_severity <= 5):
-            raise ValueError(f"Expected sweep_severity to be an integer in [1, 5], got: {cfg.sweep_severity}")
+        if not isinstance(cfg.sweep_severity, int) or not (1 <= cfg.sweep_severity <= 10):
+            raise ValueError(f"Expected sweep_severity to be an integer in [1, 10], got: {cfg.sweep_severity}")
     if cfg.shift_name == "none":
         return
     if cfg.shift_name == "appearance":
@@ -247,6 +238,9 @@ def eval_libero(cfg: GenerateConfig) -> None:
         else:
             if cfg.unnorm_key not in model.norm_stats and f"{cfg.unnorm_key}_no_noops" in model.norm_stats:
                 cfg.unnorm_key = f"{cfg.unnorm_key}_no_noops"
+            if cfg.unnorm_key not in model.norm_stats:
+                cfg.unnorm_key = list(model.norm_stats.keys())[0]
+                print(f"[warn] unnorm_key not found, falling back to: {cfg.unnorm_key}")
             assert cfg.unnorm_key in model.norm_stats, f"Action un-norm key {cfg.unnorm_key} not found in VLA `norm_stats`!"
 
     # [OpenVLA] Get Hugging Face processor
@@ -589,7 +583,7 @@ def eval_libero(cfg: GenerateConfig) -> None:
                                 processor=processor,
                                 return_probs=True,
                             )
-                            last_action = action
+                            last_action = action.copy()
                         else:
                             action = last_action
                             action_tokens, log_probs = None, None
@@ -705,23 +699,24 @@ def eval_libero(cfg: GenerateConfig) -> None:
                                 if ver_signals is not None:
                                     ver_signals.update_vlac(p_t)
                                     ver_signals.update_accumulative_progress(c_t)
-                                    # ── ACC_PROGRESS per-step log (remove when done) ──
-                                    print(f"[ACC] ep={episode_idx} task={task_id} t={t:04d} c_t={c_t:+.3f} v={ver_signals._acc_progress:.4f}")
 
                                 entry = (observation, action_tokens, r_t, log_probs)
                                 buffer.append(entry)
+
+                        if t >= cfg.num_steps_wait and ver_signals is not None \
+                                and t % VerificationSignals.LOG_EVERY == 0:
+                            _gate_ok_log, _reason_log, _signals_log = ver_signals.should_adapt(cfg)
+                            summary = ver_signals.format_summary(t, episode_idx, task_id,
+                                                                 _gate_ok_log, _reason_log, _signals_log)
+                            print(summary)
+                            log_file.write(summary + "\n")
+                            log_file.flush()
 
                         if t >= cfg.num_steps_wait and t % cfg.tta_step == 0 and len(buffer) > 0:
                             # ── Verification gate (ttvla) ─────────────────────────────────
                             ttvla_gate_ok, ttvla_reason, ttvla_signals = True, "signals_disabled", {}
                             if ver_signals is not None:
                                 ttvla_gate_ok, ttvla_reason, ttvla_signals = ver_signals.should_adapt(cfg)
-                                if t % VerificationSignals.LOG_EVERY == 0:
-                                    summary = ver_signals.format_summary(t, episode_idx, task_id,
-                                                                         ttvla_gate_ok, ttvla_reason, ttvla_signals)
-                                    print(summary)
-                                    log_file.write(summary + "\n")
-                                    log_file.flush()
                                 if signals_log_file:
                                     signals_log_file.write(
                                         ver_signals.format_timestep_record(t, episode_idx, task_id,
@@ -841,10 +836,8 @@ def eval_libero(cfg: GenerateConfig) -> None:
             "total_tta_opportunities": total_tta_opportunities,
             "total_tta_skipped": total_tta_skipped,
             "thresholds": {
-                "verify_severity_threshold": cfg.verify_severity_threshold,
-                "verify_entropy_threshold": cfg.verify_entropy_threshold,
-                "verify_vlac_delta_threshold": cfg.verify_vlac_delta_threshold,
-                "verify_vlac_slope_threshold": cfg.verify_vlac_slope_threshold,
+                "verify_cmd_mismatch_threshold": cfg.verify_cmd_mismatch_threshold,
+                "verify_window_size": cfg.verify_window_size,
             },
         },
     }

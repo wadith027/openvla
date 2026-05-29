@@ -7,7 +7,7 @@ __pycache__/
 *.so
 
 logs/
-logs_kwadith/
+logs/
 # Distribution / packaging
 .Python
 build/
@@ -157,5 +157,47 @@ images/
 log/
 analysis/
 
+smoke*
 
-smoke* 
+# Large experiment result directories (not for distribution)
+experiments/lora_oracle*/
+experiments/lora_oracle/
+experiments/shifted_demos*/
+experiments/analysis/
+experiments/log/
+
+# Model adapter checkpoints (too large for git)
+adapter-tmp/
+
+# Transferred images / episode frames
+transfer_images/
+
+# SLURM job output files
+*.out
+*.err
+slurm-*.out
+
+# Personal / session notes
+CLAUDE_SESSION.md
+
+# Backup files
+*.bak
+
+# Cluster job list files
+finetune_jobs*.txt
+eval_jobs.txt
+
+# Generated figure outputs (regenerate from scripts)
+harmful_adaptation_heatmap.*
+
+# vla-scripts logs
+vla-scripts/logs/
+
+# Cluster-specific analysis and extraction scripts (hardcoded paths)
+*_extractor.py
+parse_oracle_results.py
+rerun_failed_demos.sh
+test_verify_*.sh
+
+# Cluster-specific conda environment export
+env.yaml

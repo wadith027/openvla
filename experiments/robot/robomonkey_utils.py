@@ -61,10 +61,10 @@ def _get_local_vla_batch_actions(vla, processor, image, task_label, unnorm_key, 
     if "openvla-v01" in base_vla_name:
         prompt = (
             f"{OPENVLA_V01_SYSTEM_PROMPT} USER: "
-            f"What action should the robot take to {task_label.lower()}?\n Out:"
+            f"What action should the robot take to {task_label.lower()}?\nOut: "
             )
     else:
-        prompt = f"In: What action should the robot take to {task_label.lower()}?\n Out:"
+        prompt = f"In: What action should the robot take to {task_label.lower()}?\nOut: "
     
     single = processor(prompt, image, return_tensors="pt").to(DEVICE, dtype=torch.bfloat16)
 

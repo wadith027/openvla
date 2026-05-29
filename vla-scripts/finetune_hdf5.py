@@ -1,23 +1,11 @@
-"""
-finetune_hdf5.py
-
-LoRA fine-tuning of OpenVLA on HDF5 shifted demonstrations (Oracle upper bound baseline).
-
-Run with:
-    torchrun --standalone --nnodes 1 --nproc-per-node 1 vla-scripts/finetune_hdf5.py \
-        --vla_path <CHECKPOINT_PATH> \
-        --demo_root_dir <PATH/TO/shifted_demos/latency/sev_1> \
-        --dataset_name latency_sev1 \
-        --run_root_dir <PATH/TO/LOGS/DIR>
-"""
-
 import os
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
 import draccus
+import numpy as np
 import torch
 import torch.distributed as dist
 import tqdm
@@ -25,7 +13,7 @@ from accelerate import PartialState
 from peft import LoraConfig, PeftModel, get_peft_model, prepare_model_for_kbit_training
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.optim import AdamW
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 from transformers import AutoModelForVision2Seq, AutoProcessor, BitsAndBytesConfig
 from transformers import AutoConfig, AutoImageProcessor
 from transformers.modeling_outputs import CausalLMOutputWithPast
@@ -46,50 +34,95 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 @dataclass
 class FinetuneConfig:
-    # fmt: off
-    vla_path: str = "openvla/openvla-7b"                            # Path to OpenVLA model (on HuggingFace Hub)
+    vla_path: str = "openvla/openvla-7b"
 
     # Directory Paths
-    demo_root_dir: str = ""                                         # Path to HDF5 shifted demos dir (e.g. experiments/shifted_demos/latency/sev_1)
-    dataset_name: str = "shifted_demos"                             # Name tag for this run
-    run_root_dir: Path = Path("runs")                               # Path to directory to store logs & checkpoints
-    adapter_tmp_dir: Path = Path("adapter-tmp")                     # Temporary directory for LoRA weights before fusing
+    demo_root_dir: str = ""
+    dataset_name: str = "shifted_demos"
+    run_root_dir: Path = Path("runs")
+    adapter_tmp_dir: Path = Path("adapter-tmp")
 
     # Fine-tuning Parameters
-    batch_size: int = 16                                            # Fine-tuning batch size
-    max_steps: int = 5_000                                          # Max number of fine-tuning steps
-    save_steps: int = 1000                                          # Interval for checkpoint saving
-    learning_rate: float = 5e-4                                     # Fine-tuning learning rate
-    grad_accumulation_steps: int = 1                                # Gradient accumulation steps
-    image_aug: bool = False                                         # Whether to train with image augmentations
-    save_latest_checkpoint_only: bool = True                        # Whether to save only one checkpoint per run
+    batch_size: int = 16
+    max_steps: int = 5_000
+    save_steps: int = 1000
+    learning_rate: float = 5e-4
+    grad_accumulation_steps: int = 1
+    image_aug: bool = False
+    save_latest_checkpoint_only: bool = True
 
     # LoRA Arguments
-    use_lora: bool = True                                           # Whether to use LoRA fine-tuning
-    lora_rank: int = 32                                             # Rank of LoRA weight matrix
-    lora_dropout: float = 0.0                                       # Dropout applied to LoRA weights
-    use_quantization: bool = False                                  # Whether to 4-bit quantize VLA for LoRA fine-tuning
+    use_lora: bool = True
+    lora_rank: int = 32
+    lora_dropout: float = 0.0
+    use_quantization: bool = False
+
+    # Validation / Early Stopping
+    val_fraction: float = 0.2        # fraction of episodes held out for validation
+    val_steps: int = 50              # how often to run validation
+    early_stopping_patience: int = 5 # number of val checks with no improvement before stopping
+    val_seed: int = 42               # seed for episode split reproducibility
 
     # Tracking Parameters
-    wandb_project: str = "openvla"                                  # Name of W&B project to log to
-    wandb_entity: str = "YOUR_WANDB_ENTITY"                         # Name of entity to log under
-    use_wandb: bool = False                                         # Whether to use W&B logging
-    run_id_note: Optional[str] = None                               # Extra note for logging
+    wandb_project: str = "openvla"
+    wandb_entity: str = "YOUR_WANDB_ENTITY"
+    use_wandb: bool = False
+    run_id_note: Optional[str] = None
 
-    # fmt: on
+
+def run_validation(vla, val_dataloader, device_id):
+    """Runs one pass over the val set and returns mean loss."""
+    vla.eval()
+    total_loss = 0.0
+    n_steps = 0
+    with torch.no_grad():
+        for batch in val_dataloader:
+            with torch.autocast("cuda", dtype=torch.bfloat16):
+                output: CausalLMOutputWithPast = vla(
+                    input_ids=batch["input_ids"].to(device_id),
+                    attention_mask=batch["attention_mask"].to(device_id),
+                    pixel_values=batch["pixel_values"].to(torch.bfloat16).to(device_id),
+                    labels=batch["labels"],
+                )
+            total_loss += output.loss.item()
+            n_steps += 1
+    vla.train()
+    return total_loss / max(n_steps, 1)
+
+
+def save_checkpoint(vla, processor, run_dir, adapter_dir, vla_path, use_lora, distributed_state, step):
+    """Saves merged checkpoint."""
+    if distributed_state.is_main_process:
+        print(f"Saving Model Checkpoint for Step {step}")
+        save_dir = adapter_dir if use_lora else run_dir
+        processor.save_pretrained(run_dir)
+        vla.module.save_pretrained(save_dir)
+
+    dist.barrier()
+
+    if use_lora:
+        base_vla = AutoModelForVision2Seq.from_pretrained(
+            vla_path, torch_dtype=torch.bfloat16, low_cpu_mem_usage=True, trust_remote_code=True
+        )
+        merged_vla = PeftModel.from_pretrained(base_vla, adapter_dir)
+        merged_vla = merged_vla.merge_and_unload()
+        if distributed_state.is_main_process:
+            merged_vla.save_pretrained(run_dir)
+            print(f"Saved Model Checkpoint for Step {step} at: {run_dir}")
+
+    dist.barrier()
 
 
 @draccus.wrap()
 def finetune(cfg: FinetuneConfig) -> None:
     print(f"Fine-tuning OpenVLA Model `{cfg.vla_path}` on `{cfg.dataset_name}`")
     assert cfg.demo_root_dir != "", "Must provide --demo_root_dir!"
+    assert torch.cuda.is_available()
 
-    assert torch.cuda.is_available(), "Fine-tuning assumes at least one GPU is available!"
     distributed_state = PartialState()
     torch.cuda.set_device(device_id := distributed_state.local_process_index)
     torch.cuda.empty_cache()
 
-    # Configure Unique Experiment ID & Log Directory
     exp_id = (
         f"{cfg.vla_path.split('/')[-1]}+{cfg.dataset_name}"
         f"+b{cfg.batch_size * cfg.grad_accumulation_steps}"
@@ -102,24 +135,22 @@ def finetune(cfg: FinetuneConfig) -> None:
     if cfg.run_id_note is not None:
         exp_id += f"--{cfg.run_id_note}"
 
-    run_dir, adapter_dir = cfg.run_root_dir / exp_id, cfg.adapter_tmp_dir / exp_id
+    run_dir = cfg.run_root_dir / exp_id
+    adapter_dir = cfg.adapter_tmp_dir / exp_id
     os.makedirs(run_dir, exist_ok=True)
 
-    # Quantization Config
     quantization_config = None
     if cfg.use_quantization:
-        assert cfg.use_lora, "Quantized training only supported for LoRA fine-tuning!"
+        assert cfg.use_lora
         quantization_config = BitsAndBytesConfig(
             load_in_4bit=True, bnb_4bit_compute_dtype=torch.bfloat16, bnb_4bit_quant_type="nf4"
         )
 
-    # Register OpenVLA model to HF Auto Classes
     AutoConfig.register("openvla", OpenVLAConfig)
     AutoImageProcessor.register(OpenVLAConfig, PrismaticImageProcessor)
     AutoProcessor.register(OpenVLAConfig, PrismaticProcessor)
     AutoModelForVision2Seq.register(OpenVLAConfig, OpenVLAForActionPrediction)
 
-    # Load OpenVLA Processor and Model
     processor = AutoProcessor.from_pretrained(cfg.vla_path, trust_remote_code=True)
     vla = AutoModelForVision2Seq.from_pretrained(
         cfg.vla_path,
@@ -134,29 +165,26 @@ def finetune(cfg: FinetuneConfig) -> None:
     else:
         vla = vla.to(device_id)
 
-    # LoRA
     if cfg.use_lora:
         lora_config = LoraConfig(
             r=cfg.lora_rank,
             lora_alpha=min(cfg.lora_rank, 16),
             lora_dropout=cfg.lora_dropout,
-            target_modules="all-linear",
+            target_modules=["q_proj", "k_proj", "v_proj", "o_proj", 
+                            "gate_proj", "up_proj", "down_proj"],
             init_lora_weights="gaussian",
         )
         vla = get_peft_model(vla, lora_config)
         vla.print_trainable_parameters()
 
-    # DDP
     vla = DDP(vla, device_ids=[device_id], find_unused_parameters=True, gradient_as_bucket_view=True)
 
-    # Optimizer
     trainable_params = [param for param in vla.parameters() if param.requires_grad]
     optimizer = AdamW(trainable_params, lr=cfg.learning_rate)
 
-    # Action Tokenizer
     action_tokenizer = ActionTokenizer(processor.tokenizer)
 
-    # Load HDF5 Dataset
+    # Build full dataset
     vla_dataset = HDF5ShiftedDemoDataset(
         cfg.demo_root_dir,
         action_tokenizer,
@@ -165,23 +193,48 @@ def finetune(cfg: FinetuneConfig) -> None:
         prompt_builder_fn=PurePromptBuilder if "v01" not in cfg.vla_path else VicunaV15ChatPromptBuilder,
     )
 
-    # Save Dataset Statistics
+    # Episode-level train/val split
+    n_episodes = len(vla_dataset.episodes)
+    n_val_eps = max(1, int(n_episodes * cfg.val_fraction))
+    n_train_eps = n_episodes - n_val_eps
+
+    rng = np.random.default_rng(cfg.val_seed)
+    shuffled_eps = rng.permutation(n_episodes)
+    val_ep_set = set(shuffled_eps[:n_val_eps].tolist())
+    train_ep_set = set(shuffled_eps[n_val_eps:].tolist())
+
+    train_indices = [i for i, ep in enumerate(vla_dataset.sample_episode_idx) if ep in train_ep_set]
+    val_indices = [i for i, ep in enumerate(vla_dataset.sample_episode_idx) if ep in val_ep_set]
+
+    train_dataset = Subset(vla_dataset, train_indices)
+    val_dataset = Subset(vla_dataset, val_indices)
+
+    print(f"Split: {n_train_eps} train episodes ({len(train_indices)} steps) | "
+          f"{n_val_eps} val episodes ({len(val_indices)} steps)")
+
+    # Save dataset statistics (from full dataset — loaded from fixed base path, no leak)
     if distributed_state.is_main_process:
         save_dataset_statistics(vla_dataset.dataset_statistics, run_dir)
 
-    # Collator and DataLoader
     collator = PaddedCollatorForActionPrediction(
         processor.tokenizer.model_max_length, processor.tokenizer.pad_token_id, padding_side="right"
     )
-    dataloader = DataLoader(
-        vla_dataset,
+
+    train_dataloader = DataLoader(
+        train_dataset,
         batch_size=cfg.batch_size,
         shuffle=True,
         collate_fn=collator,
         num_workers=4,
     )
+    val_dataloader = DataLoader(
+        val_dataset,
+        batch_size=cfg.batch_size,
+        shuffle=False,
+        collate_fn=collator,
+        num_workers=4,
+    )
 
-    # W&B
     if distributed_state.is_main_process and cfg.use_wandb:
         wandb.init(entity=cfg.wandb_entity, project=cfg.wandb_project, name=f"ft+{exp_id}")
 
@@ -189,7 +242,10 @@ def finetune(cfg: FinetuneConfig) -> None:
     recent_action_accuracies = deque(maxlen=cfg.grad_accumulation_steps)
     recent_l1_losses = deque(maxlen=cfg.grad_accumulation_steps)
 
-    # Train!
+    best_val_loss = float("inf")
+    patience_counter = 0
+    best_step = 0
+
     with tqdm.tqdm(total=cfg.max_steps, leave=False) as progress:
         vla.train()
         optimizer.zero_grad()
@@ -197,7 +253,7 @@ def finetune(cfg: FinetuneConfig) -> None:
         done = False
 
         while not done:
-            for batch in dataloader:
+            for batch in train_dataloader:
                 with torch.autocast("cuda", dtype=torch.bfloat16):
                     output: CausalLMOutputWithPast = vla(
                         input_ids=batch["input_ids"].to(device_id),
@@ -210,7 +266,6 @@ def finetune(cfg: FinetuneConfig) -> None:
                 normalized_loss = loss / cfg.grad_accumulation_steps
                 normalized_loss.backward()
 
-                # Metrics
                 action_logits = output.logits[:, vla.module.vision_backbone.featurizer.patch_embed.num_patches : -1]
                 action_preds = action_logits.argmax(dim=2)
                 action_gt = batch["labels"][:, 1:].to(action_preds.device)
@@ -238,7 +293,8 @@ def finetune(cfg: FinetuneConfig) -> None:
                 smoothened_l1_loss = sum(recent_l1_losses) / len(recent_l1_losses)
 
                 if distributed_state.is_main_process and gradient_step_idx % 10 == 0:
-                    print(f"  [step={gradient_step_idx}] loss={smoothened_loss:.4f} acc={smoothened_action_accuracy:.4f} l1={smoothened_l1_loss:.4f}")
+                    print(f"  [step={gradient_step_idx}] train_loss={smoothened_loss:.4f} "
+                          f"acc={smoothened_action_accuracy:.4f} l1={smoothened_l1_loss:.4f}")
                     if cfg.use_wandb:
                         wandb.log(
                             {
@@ -254,30 +310,44 @@ def finetune(cfg: FinetuneConfig) -> None:
                     optimizer.zero_grad()
                     progress.update()
 
-                # Save checkpoint
-                if gradient_step_idx > 0 and gradient_step_idx % cfg.save_steps == 0:
+                # Validation + early stopping
+                if gradient_step_idx > 0 and gradient_step_idx % cfg.val_steps == 0:
+                    val_loss = run_validation(vla, val_dataloader, device_id)
+
                     if distributed_state.is_main_process:
-                        print(f"Saving Model Checkpoint for Step {gradient_step_idx}")
-                        save_dir = adapter_dir if cfg.use_lora else run_dir
-                        processor.save_pretrained(run_dir)
-                        vla.module.save_pretrained(save_dir)
+                        print(f"  [step={gradient_step_idx}] val_loss={val_loss:.4f} "
+                              f"(best={best_val_loss:.4f} @ step {best_step})")
+                        if cfg.use_wandb:
+                            wandb.log({"val_loss": val_loss}, step=gradient_step_idx)
 
-                    dist.barrier()
-
-                    if cfg.use_lora:
-                        base_vla = AutoModelForVision2Seq.from_pretrained(
-                            cfg.vla_path, torch_dtype=torch.bfloat16, low_cpu_mem_usage=True, trust_remote_code=True
-                        )
-                        merged_vla = PeftModel.from_pretrained(base_vla, adapter_dir)
-                        merged_vla = merged_vla.merge_and_unload()
-                        if distributed_state.is_main_process:
-                            merged_vla.save_pretrained(run_dir)
-                            print(f"Saved Model Checkpoint for Step {gradient_step_idx} at: {run_dir}")
-
-                    dist.barrier()
+                        if val_loss < best_val_loss:
+                            best_val_loss = val_loss
+                            best_step = gradient_step_idx
+                            patience_counter = 0
+                            print(f"  New best val loss — saving checkpoint")
+                            save_checkpoint(
+                                vla, processor, run_dir, adapter_dir,
+                                cfg.vla_path, cfg.use_lora, distributed_state,
+                                gradient_step_idx
+                            )
+                        else:
+                            patience_counter += 1
+                            print(f"  No improvement ({patience_counter}/{cfg.early_stopping_patience})")
+                            if patience_counter >= cfg.early_stopping_patience:
+                                print(f"Early stopping at step {gradient_step_idx}. "
+                                      f"Best val loss {best_val_loss:.4f} at step {best_step}.")
+                                done = True
+                                break
 
                 if gradient_step_idx >= cfg.max_steps:
-                    print(f"Max step {cfg.max_steps} reached! Stopping training...")
+                    print(f"Max step {cfg.max_steps} reached!")
+                    # Save final if it happens to be best
+                    if distributed_state.is_main_process and best_step == 0:
+                        save_checkpoint(
+                            vla, processor, run_dir, adapter_dir,
+                            cfg.vla_path, cfg.use_lora, distributed_state,
+                            gradient_step_idx
+                        )
                     done = True
                     break
 
